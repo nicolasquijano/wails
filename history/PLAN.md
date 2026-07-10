@@ -6,6 +6,48 @@
 
 ---
 
+## 0. Investigación del ecosistema Go↔CEF (2026-07-09)
+
+Análisis comparativo previo a fijar la decisión de binding Go↔CEF.
+
+| Paquete | Versión actual | Estado | Actividad | Encaja con Wails |
+|---|---|---|---|---|
+| **`github.com/energye/energy/v3`** | **v3.0.16** (May 30, 2026) | Estable, en producción | **10+ releases en mayo 2026**, 606 stars, 41 releases, 2,631 commits | **Excelente** — mismo autor expone bindings WebKit2GTK en `energye/wv`; arquitectura multi-engine ya probada |
+| `github.com/bnema/purego-cef` | v0.13.3 (Jun 9, 2026) | Pre-1.0, experimental | 0 stars, 0 forks, 1 contrib, 17 releases | Bajo — solo CEF, sin window management GTK |
+| `github.com/Crushless/fyne_browser` | v0.0.3-alpha (Mar 28, 2026) | Alpha | Acoplado a fyne | Nulo — Wails no usa fyne |
+| `github.com/richardwilkes/cef` | v0.5.3 (Ene 11, 2020) | **Muerto 6 años** | 0 importados en Go | Nulo |
+
+### Por qué `energye/energy/v3` es la elección correcta
+
+1. **Único viable en producción.** Los otros 3 candidatos son: experimental sin tracción, alpha acoplado a otro toolkit, o muertos 6-8 años.
+2. **Arquitectura multi-engine ya resuelta.** El módulo v3 contiene:
+   ```
+   github.com/energye/energy/v3@v3.0.16/
+   ├── application/     framework/orquestador (similar a wails/pkg/application)
+   ├── cef/             bindings CEF (lo que vamos a usar)
+   ├── lcl/             UI toolkit (Lazarus Components Library)
+   ├── platform/linux/  ← IMPORTANTE: ya tiene gtk3/, webkit2gtk/, notification/, systray/, callback/
+   ├── window/          window management
+   └── wv/              bindings WebView (webkit2gtk en linux) — ¡también!
+   ```
+   El autor ya enfrentó el mismo problema (multi-engine en Linux) y lo resolvió con un patrón similar al de Wails.
+3. **Ahorra trabajo crítico.** Los ~2200 LOC de `linux_cgo.go` mapean 1-a-1 a las APIs de CEF. Sin energye: ~6 semanas escribiendo cgo contra headers C++ de CEF (que cambian entre versiones). Con energye: ~1-2 semanas conectando el browser a `linuxWebviewWindow`.
+4. **LCL ya usa GTK internamente**, así que la arquitectura GTK host ya existe resuelta.
+5. **Riesgos acotados.** Si energye se abandona, el fork es a una sola dependencia puntual. Plan B: `Wails-CEF/internal/energy-fork/`.
+
+### Versión correcta
+
+**No usar `github.com/energye/energy v1.109.1184`** (es la versión de hace 3 años, aún en module cache del proyecto ARCA-BOT). **Usar `github.com/energye/energy/v3 v3.0.16`** (rama actual, publicada mensualmente).
+
+### Estrategia de integración (importante)
+
+**NO usar energye como framework completo** (eso reemplazaría Wails, sus event loops, su asset server, su messageprocessor, todo). **Usar `energye/cef` como biblioteca de bindings** para implementar `linuxWebviewWindow` dentro de Wails. La lógica de Wails (`messageprocessor`, `assetserver`, IPC JS↔Go) se queda exactamente donde está.
+
+Concretamente:
+- Importar `github.com/energye/cef` (los bindings CEF puros) y posiblemente `github.com/energye/lcl` (para window host).
+- NO importar `github.com/energye/energy/v3/application` (eso sería reemplazar a Wails).
+- `linuxWebviewWindow` (en wails) llama a `cef.NewClient(...)`, `cef.ExecuteJavaScript(...)`, etc. directamente.
+
 ## 1. Contexto y restricciones
 
 Wails v3 ya tiene una arquitectura multi-backend en Linux basada en **build tags Go** (no runtime switches). El patrón vigente desde la decisión 1.1 (post-issue #5459, 2026-05-16):
@@ -28,20 +70,22 @@ Wails v3 ya tiene una arquitectura multi-backend en Linux basada en **build tags
 
 ## 2. Decisiones arquitectónicas (a validar con el equipo)
 
-### 2.1 Binding Go↔CEF: `energye/energy` vs cgo manual a `libcef.so`
+### 2.1 Binding Go↔CEF: `energye/energy/v3` vs cgo manual a `libcef.so`
 
-| Aspecto | `energye/energy v1.109.1184` | cgo manual contra `libcef.so` |
+(Análisis completo en §0. Resumen aquí.)
+
+| Aspecto | `energye/energy/v3 v3.0.16` | cgo manual contra `libcef.so` |
 |---|---|---|
-| Madurez | Producción, varios años, doc en `cefsun` | Nula; hay que escribir los bindings |
-| Mantenimiento | Activo (v1.109 alinea con CEF 109) | Total responsabilidad nuestra |
+| Madurez | Estable, en producción (10+ releases mayo 2026) | Nula; hay que escribir los bindings |
+| Mantenimiento | Activo, releases mensuales, 2,631 commits | Total responsabilidad nuestra |
 | Dependencia runtime | Carga `libcef.so` enlazada por C (LCL/GTK) | Carga `libcef.so` por dlopen |
-| Wrapper gráfico | GTK3 via `golang.org/x/exp/shiny`-estilo LCL | Usamos el `CefBrowserHost::CreateBrowser` con su propio widget parent GTK |
+| Wrapper gráfico | GTK via `energye/lcl` (ya resuelto) | Usamos el `CefBrowserHost::CreateBrowser` con su propio widget parent GTK |
 | Peso binario | +~30MB CEF distribución | Igual (CEF binarios aparte) |
-| Alineamiento con Wails v3 | Independiente | Independiente |
+| Alineamiento con Wails v3 | Mismo autor ya enfrentó multi-engine en Linux | Independiente |
 | Riesgo | LCL podría divergir de GTK4 en uso | Ninguna dependencia extra |
 | Esfuerzo | ~1-2 semanas (montar la integración) | ~4-6 semanas (replicar el equivalente de `linux_cgo.go`, ~2200 LOC) |
 
-**Recomendación**: `energye/energy`. La sección crítica a reimplementar (`linux_cgo.go`) tiene 2164 LOC con muchos callbacks C↔Go y bindings a WebKitGTK; replicar eso contra CEF C API en cgo es esfuerzo no rentable para un opt-in.
+**Recomendación**: `energye/energy/v3 v3.0.16` (rama `v3`, NO la rama legacy `v1`). Ver §0 para análisis completo del ecosistema.
 
 ### 2.2 Tag de build
 
@@ -192,7 +236,13 @@ v3/Taskfile.yaml:
 ### Fase 1 — Stub mínimo con `energye/energy` (2-3 días)
 **Objetivo**: tener un `webview_window_linux_cef.go` que cree un `CefBrowser` cargando `http://localhost:34115` (dev server) o `wails://` (asset server stub), sin IPC, sin devtools.
 
-1. Agregar `github.com/energye/energy v1.109.1184` como dependencia en `v3/go.mod`.
+1. Agregar las siguientes dependencias en `v3/go.mod` (sólo cuando se compila con `-tags cef`):
+   ```
+   github.com/energye/cef v1.0.5          // bindings CEF puros (lo principal)
+   github.com/energye/lcl v1.0.9          // UI toolkit (opcional, si necesitamos window host)
+   github.com/energye/wv v1.0.10          // no se usa directamente (sólo para documentar dependencia)
+   ```
+   **NO** importar `github.com/energye/energy/v3/application` — usar energye sólo como **biblioteca de bindings**, no como framework (eso reemplazaría a Wails).
 2. En `application_linux_cef.go`: inicializar `cefapi.LoadLibs(CEF_PATH)` y arrancar el message loop.
 3. En `webview_window_linux_cef.go`: usar `cefBrowserWindow` de energye como motor, embedido en un `GtkBox` GTK4.
 4. Sin esquema handler propio: usar `custom-scheme` o `http://wails.localhost` con un stub.
@@ -265,12 +315,12 @@ v3/Taskfile.yaml:
 
 | Riesgo | Impacto | Mitigación |
 |---|---|---|
-| `energye/energy` cae en abandono | Alto (binding único) | Pin a `v1.109.1184`, fork interno como respaldo en `Wails-CEF/internal/energy-fork/` si es necesario |
+| `energye/energy` cae en abandono | Alto (binding único) | Pin a `v3.0.16`, fork interno como respaldo en `Wails-CEF/internal/energy-fork/` si es necesario |
 | CEF requiere X11/Wayland específicos | Medio | Documentar pre-requisitos; probar con `cefapp --ozone-platform=wayland` |
 | Tamaño binario +50MB CEF | Bajo (opt-in) | Documentar; ofrecer build `cef-min` con `strip` |
 | Diferencias de comportamiento entre WebKit y Chromium (CSS, APIs) | Alto | No prometer paridad 100%; tests de smoke por feature |
 | `cef` colisiona con `gtk3` si el usuario combina tags | Bajo | Documentar: `cef` y `gtk3` son mutuamente excluyentes; elegir uno |
-| LCL/GTK4 integration en `energye` | Medio | energye v1.109 usa GTK3 internamente — confirmado que con `-tags cef` cargamos `libwebkit2gtk-4.1` igual o cambiamos por CEF. Verificar en fase 1. |
+| LCL usa GTK3 internamente — ¿cómo dialoga con el GTK4 que Wails ya usa? | Medio | energye v3 trae `platform/linux/gtk3/` y `platform/linux/webkit2gtk/`. Cargar LCL puede forzar GTK3 en el proceso. Verificar en fase 1: si choca con el GTK4 del host, usar `libenergy.so` por dlopen o cargar CEF directo vía `energye/cef` sin pasar por LCL. |
 
 ---
 
@@ -362,5 +412,6 @@ bd create "Fase 3: IPC JS↔Go con CefV8Handler" -t feature -p 1 --deps discover
 bd create "Fase 4: devtools/permisos/DnD/menu contextual" -t task -p 2 --json
 bd create "Fase 5: doctor-ng soporta categoría cef" -t task -p 2 --json
 bd create "Fase 6: ejemplos + CI + docs" -t task -p 2 --json
-bd create "Spike: validar energye v1.109 con GTK4" -t task -p 1 --json
+bd create "Spike: validar energye v3.0.16 carga limpia sin chocar con GTK4 del host" -t task -p 1 --json
+bd create "Spike: probar carga alternativa sin LCL (solo energye/cef directo)" -t task -p 1 --json
 ```

@@ -598,7 +598,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 
 **Context**: Two options to expose CEF to Go: cgo manual against `libcef.so` (~2200 LOC of equivalent `linux_cgo.go` bindings) or use the existing `github.com/energye/energy` package.
 
-**Decision**: Use `github.com/energye/energy v1.109.1184` (CEF 109-compatible) for the C bindings.
+**Decision**: Use `github.com/energye/energy/v3 v3.0.16` (CEF 109-compatible, current stable release from May 30, 2026) as the C bindings. Use `energye/cef` as a **library**, not `energye/v3/application` as a framework (the latter would replace Wails).
 
 **Rationale**:
 - Production-tested, multiple years of maintenance
@@ -606,7 +606,9 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 - Saves ~4-6 weeks of binding work
 - Pins cleanly in `go.mod`
 
-**Risk**: If `energye/energy` becomes unmaintained, fork to `Wails-CEF/internal/energy-fork/`.
+**Risk**: If `energye/energy` becomes unmaintained, fork to `Wails-CEF/internal/energy-fork/`. Plan B (no energye): cgo manual contra `libcef.so`, ~4-6 semanas (vs ~1-2 con energye).
+
+**Strategy**: Import `github.com/energye/cef` (and optionally `github.com/energye/lcl`) as **libraries** to implement `linuxWebviewWindow` inside Wails. Do **not** import `github.com/energye/energy/v3/application` — that would replace Wails' own application/event loop.
 
 ### Implementation Phases
 
@@ -639,5 +641,8 @@ See `history/PLAN.md` §3 for the full file-by-file plan.
 - Cloned wails v3 (master, alpha2.117) at `/home/nicolas/Documentos/GitHub/Wails-CEF`
 - Created branch `feat/linux-cef`
 - Created plan at `history/PLAN.md` (full 6-phase plan)
-- Confirmed `energye/energy v1.109.1184` available in module cache
+- Confirmed `energye/energy/v3 v3.0.16` available in Go module proxy (commit `5eec43ce0dfae13d548af0f06d74191c1db97217`, May 30, 2026)
+- Confirmed ecosystem analysis: `energye` is the only viable CEF binding for Go in 2026; alternatives (`bnema/purego-cef`, `Crushless/fyne_browser`, `richardwilkes/cef`) are either experimental, dead, or coupled to other toolkits
+- Strategy: use energye as **library** (import `energye/cef` for bindings), NOT as framework (avoid `energye/v3/application` which would replace Wails)
+- Added §0 to `history/PLAN.md` with full ecosystem comparison table
 - Inventoried all `*_linux*.go` files: 10 require build-tag modification to add `!cef`
