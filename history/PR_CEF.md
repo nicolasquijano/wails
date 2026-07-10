@@ -134,6 +134,11 @@ docs: add CEF/Chromium Embedded implementation plan (Linux opt-in)
    we never wire ConfigureNotify on the host window. Phase 4 resize
    tracking is still pending; currently the CEF view sticks to its
    800×600 initial bounds until you explicitly call `setSize`.
+   — **resolved in 443240298** by hooking `notify::width` and
+   `notify::height` on the GtkBox and calling `XResizeWindow`
+   from the C-level handler. GTK4 dropped the GTK3
+   `size-allocate` signal, so property notify is the supported
+   replacement.
 3. **No smoke test on a real X11 session**. The XWayland capture
    path returns black; we have logs showing the pipeline is correct
    end-to-end but no visual confirmation that the HTML actually paints.

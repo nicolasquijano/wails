@@ -87,8 +87,12 @@ ventana GTK.
 2. **Verificación visual en sesión X11 pura** — el screen capture
    tooling (`xwininfo`, `ffmpeg -f x11grab`) devuelve negro en este
    host KDE+XWayland. Confirmar visualmente en un display real.
-3. **Auto-resize del CEF view con el `GtkBox`** — falta el wiring de
-   ConfigureNotify en el host window.
+3. **Auto-resize del CEF view con el `GtkBox`** — completado en
+   `443240298`. Conecta `notify::width` y `notify::height` del
+   `GtkBox` (GTK4 reemplazó el signal `size-allocate` de GTK3) y
+   llama `XResizeWindow` desde el handler en C. El primer allocation
+   post-`gtk_window_present` redimensiona la vista CEF al tamaño
+   real del box, no al 800×600 inicial.
 4. **Workflow de CI para `-tags cef`** — diferido hasta que la ruta
    de rendering esté sólida.
 5. **Push a `origin/feat/linux-cef`** — bloqueado por credenciales

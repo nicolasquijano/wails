@@ -1275,6 +1275,35 @@ $ DISPLAY=:1 GDK_BACKEND=x11 CEF_DIR=~/cef147std/.../Release /tmp/cef-hello
 - All 4 build modes compile; `pkg/application` tests pass in default,
   `gtk3`, and `cef` modes.
 
+#### 2026-07-10 (Session C.0j — auto-resize via notify::width/height)
+
+**Goal**: Wire the CEF view to follow the `GtkBox`'s allocated size.
+
+**What changed**:
+- GTK4 dropped the GTK3 `size-allocate` signal. The first attempt
+  to use it produced `GLib-GObject: signal 'size-allocate' is
+  invalid for instance ... of type 'GtkBox'`. Replaced with
+  `notify::width` and `notify::height` property-notify signals
+  on the `GtkBox`, which is the GTK4-supported mechanism.
+- `cef_attach_to_gtk_widget` now stashes the CEF view XID on
+  the widget via `g_object_set_data(key="wails-cef-view-xid")` and
+  connects `notify::width` / `notify::height` to a C callback that
+  calls `XResizeWindow` on the CEF view to match the box's current
+  width/height.
+- The first allocation (which fires shortly after
+  `gtk_window_present`) resizes the CEF view from the 800×600 we
+  pass in `WindowInfo.Bounds` to whatever the box's actual size
+  is. Subsequent resizes (e.g. user drags the window) follow.
+
+**Verification**:
+- CEF log: no new errors, no GLib-GObject complaints.
+- `pkg/application` tests pass in default / `gtk3` / `cef` modes.
+- All 4 build modes build cleanly.
+
+**Follow-ups removed**:
+- The "browser stuck at 800×600 regardless of window size"
+  follow-up from `history/PR_CEF.md` is **resolved**.
+
 #### 2026-07-10 (Session C.0h — Phases 5 + 6)
 
 **Goal**: Wrap up doctor-ng integration, examples, and documentation
