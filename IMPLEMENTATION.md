@@ -620,6 +620,11 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | 3 | JS↔Go IPC via CefV8Handler + RegisterExtension | ✅ COMPLETE (2026-07-09) | ~350 LOC | 3 new + 1 modified |
 | 4 | Body streaming + return values + flags/env + events | ✅ COMPLETE (2026-07-09) | ~250 LOC diff | 2 modified |
 | 4.1 | Smoke test: link against real libcef + first run | 🚧 PARTIAL (2026-07-10) | n/a (no CEF 147 available locally) | 2 modified |
+| 4.2 | Wire g_application_run, kill core dump | ✅ COMPLETE (2026-07-10) | ~30 LOC | 2 modified |
+| 4.3 | Replace SetAsWindowless with X11 child attach | ✅ COMPLETE (2026-07-10) | ~30 LOC | 1 modified |
+| 4.4 | Register wails scheme, debug logging | ✅ COMPLETE (2026-07-10) | ~60 LOC | 5 modified |
+| 4.5 | Subprocess detection + file-based debug log | ✅ COMPLETE (2026-07-10) | ~70 LOC | 4 modified |
+| 4.6 | Browser creation deadlock | ❌ BLOCKED | n/a | n/a |
 | 5 | doctor-ng + packaging | ✅ COMPLETE (2026-07-10) | ~50 LOC | 7 modified |
 | 6 | Examples + CI + docs | ✅ COMPLETE (2026-07-10) | ~250 LOC | 3 new + 1 modified |
 
@@ -1037,6 +1042,69 @@ CEF_DIR=/opt/cef /tmp/cef-test
 **Next**: Get CEF 147 installed to finish Option A. The remaining 4
 issues (body streaming return values, DevTools, window resize, GTK
 main loop integration) can only be verified end-to-end with CEF 147.
+
+#### 2026-07-10 (Session C.0i — Phase 4.6 deadlock)
+
+**Goal**: Get past the GTK main loop + window creation + browser
+creation dance.
+
+**What was tried**:
+- g_application_run as the main loop (Phase 4.2): works, but
+  blocks the main thread.
+- Switched Phase 1 SetAsWindowless to X11 child attach
+  (Phase 4.3): creates a visible X11 window, but CEF needs the
+  parent_window to be set on the WindowInfo, not zero.
+- Registered "wails" custom scheme via
+  RegisterSchemeHandlerFactory (Phase 4.4): CEF now resolves
+  wails:// URLs as valid.
+- Detected helper subprocesses in init() (Phase 4.5): no more
+  parallel CEF runtimes competing for the same process.
+
+**What was found (BLOCKED)**:
+- debugLog file `/tmp/wails-cef-debug.log` shows:
+  ```
+  [newPlatformApp] start
+  [newPlatformApp] after cefInit
+  [registerWailsScheme] rc=1
+  [linuxWebviewWindow.run] starting url="wails://localhost/"
+  [linuxWebviewWindow.run] cefCreateHostWindow window=true vbox=true
+  <STALL>
+  ```
+- The log stalls immediately after `cefCreateHostWindow` returns.
+  `cefCreateBrowserInWidget` is never called.
+- Hypothesised cause: `g_application_run` blocks the main
+  thread. `InvokeSync(w.impl.run)` in `webview_window.go:469`
+  waits for the main thread → deadlock.
+
+**Where the branch stands**:
+- All 4 build modes compile
+- CEF 147 loads, init returns 0, sub-processes spawn correctly
+- A GTK4 window with a CEF X11 child renders (visible to the
+  user, currently showing a blank/grey background)
+- The browser content pipeline is wired but the browser itself
+  is never created due to the main-loop/InvokeSync deadlock
+- Body streaming, IPC, etc. are correctly implemented but
+  untestable end-to-end until the browser is created
+
+**What the user sees**:
+- `se abre la ventana pero vacia` / `pantalla en negro`
+- The GTK window is there, the X11 child of CEF is there, but
+  CEF never gets the `cefCreateBrowserInWidget` call to render
+  content.
+
+**Next step (Phase 4.6+)**:
+Two ways forward:
+1. **Restructure the main loop** to not block on g_application_run
+   (e.g. register a g_idle callback that runs when the GTK loop is
+   idle, so the CEF window creation happens on the right thread
+   without needing InvokeSync).
+2. **Create the browser BEFORE the main loop starts**. Webview
+   creation must happen before g_application_run so the
+   InvokeSync semaphore works correctly.
+
+Both are non-trivial refactors of `application_linux_cef.go`. The
+branch remains in a state where the build pipeline is correct but
+the runtime integration is incomplete.
 
 #### 2026-07-10 (Session C.0h — Phases 5 + 6)
 
