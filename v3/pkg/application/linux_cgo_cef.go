@@ -6,11 +6,18 @@ package application
 #cgo pkg-config: gtk4
 #cgo pkg-config: gtk4-x11
 #cgo pkg-config: x11
+#cgo pkg-config: gio-unix-2.0
 
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <gdk/x11/gdkx.h>
+#include <gio/gio.h>
 #include <X11/Xlib.h>
+
+// Trivial callback used to satisfy g_application's "activate" signal.
+void cef_activate_cb(GApplication *app, gpointer data) {
+	(void) app; (void) data;
+}
 
 // cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid` (the
 // host window created by CEF for its browser view) as a child of the GTK
@@ -152,10 +159,40 @@ func cefAttachToGTKWidget(gtkWidget unsafe.Pointer, cefWindowXID uintptr) {
 }
 
 // -----------------------------------------------------------------------------
-// Host GTK window helpers used by webview_window_linux_cef.go.
-// These create and manipulate the GtkApplicationWindow that hosts the CEF
-// browser view. In Phase 1 they mirror the GTK4 default backend.
+// Application main loop.
 // -----------------------------------------------------------------------------
+
+// appRun runs the GTK main loop. Mirrors the GTK4 default's
+// implementation: g_application_hold + g_application_run. The
+// "activate" signal is connected to a trivial C callback
+// (cef_activate_cb) defined in the cgo block above.
+//
+// CEF's message loop is pumped separately by the browser-process
+// thread; CefBrowserHost::CreateBrowser returns once the render
+// process is ready and CEF keeps running independently of the GTK
+// loop. We don't need to integrate the two loops further for Phase 1.
+func appRun(app pointer) error {
+	application := (*C.GApplication)(app)
+	C.g_application_hold(application)
+
+	// Connect "activate" to the trivial callback. We use
+	// g_signal_connect_data (the non-macro variant) so cgo's type
+	// checker sees the function pointer correctly.
+	activate := C.CString("activate")
+	defer C.free(unsafe.Pointer(activate))
+	C.g_signal_connect_data(
+		C.gpointer(unsafe.Pointer(application)),
+		activate,
+		(*[0]byte)(unsafe.Pointer(C.cef_activate_cb)),
+		nil,
+		nil,
+		0,
+	)
+
+	status := C.g_application_run(application, 0, nil)
+	_ = status
+	return nil
+}
 
 // appNew wraps gtk_application_new with the G_APPLICATION_FLAGS_NONE flag.
 func appNew(name string) pointer {

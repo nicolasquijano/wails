@@ -4,11 +4,15 @@ package application
 
 /*
 #cgo pkg-config: gtk4
+#cgo pkg-config: gio-unix-2.0
 
 #include <gtk/gtk.h>
+#include <gio/gio.h>
 static guint get_compiled_gtk_major_version() { return gtk_get_major_version(); }
 static guint get_compiled_gtk_minor_version() { return gtk_get_minor_version(); }
 static guint get_compiled_gtk_micro_version() { return gtk_get_micro_version(); }
+
+// (cef_activate_cb is defined in linux_cgo_cef.go's cgo block.)
 */
 import "C"
 
@@ -72,18 +76,7 @@ func isValidAppIDStart(c byte) bool {
 
 func setProgramName(name string) { _ = name }
 
-// appRun / appDestroy are Phase 1 stubs that mirror the GTK4 default but
-// use the CEF-aware bootstrap sequence: cefInit -> gtk main loop ->
-// cefShutdown on exit. In Phase 1 we don't actually start a GTK main loop
-// from inside the CEF backend (that lands when we implement
-// runApplicationLoop). The init hook will be triggered externally by
-// examples/cef-hello.
-func appRun(app pointer) error {
-	_ = app
-	// Block forever-ish so the host process stays alive while CEF/GTK
-	// are running. Phase 2 will replace this with gtk_main().
-	select {}
-}
+// appRun and appDestroy are implemented in linux_cgo_cef.go.
 
 func appDestroy(app pointer) {
 	if app != nil {
