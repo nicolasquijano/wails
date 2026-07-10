@@ -570,3 +570,74 @@ v3/internal/assetserver/webview/
 - Added `gtk3` constraint to 5 existing files
 - Created 5 new GTK4 stub files
 - Updated UNRELEASED_CHANGELOG.md
+
+---
+
+## CEF / Chromium Embedded — Linux opt-in tracker
+
+**Branch**: `feat/linux-cef`
+**Started**: 2026-07-09
+**Status**: 📋 PLANNING (Fase 0 pending)
+
+### Goal
+
+Add CEF as a third webview backend on Linux, behind `-tags cef`, while preserving `webgtk` (default) and `gtk3` (legacy) untouched.
+
+### Decision C.1 — CEF as opt-in via `-tags cef` (2026-07-09)
+
+**Context**: Some apps need Chromium-grade rendering (widevine/L1, better ES support, WebUSB, etc.) on Linux without Windows/macOS. CEF fills that gap.
+
+**Decision**: Introduce a `cef` build tag. The default build (no tag) and `gtk3` legacy tag remain the supported paths; `cef` is experimental opt-in.
+
+**Rationale**:
+- Mirrors the existing `gtk3` opt-in pattern (Decision 1.1)
+- No runtime cost for users who don't enable it
+- Keeps the bundled library footprint minimal (CEF only loaded when requested)
+
+### Decision C.2 — Use `energye/energy` as Go↔CEF binding (2026-07-09)
+
+**Context**: Two options to expose CEF to Go: cgo manual against `libcef.so` (~2200 LOC of equivalent `linux_cgo.go` bindings) or use the existing `github.com/energye/energy` package.
+
+**Decision**: Use `github.com/energye/energy v1.109.1184` (CEF 109-compatible) for the C bindings.
+
+**Rationale**:
+- Production-tested, multiple years of maintenance
+- Aligned with CEF 109 (current stable LTS at plan time)
+- Saves ~4-6 weeks of binding work
+- Pins cleanly in `go.mod`
+
+**Risk**: If `energye/energy` becomes unmaintained, fork to `Wails-CEF/internal/energy-fork/`.
+
+### Implementation Phases
+
+| Phase | Name | Status | LOC est. | Files |
+|---|---|---|---|---|
+| 0 | Build tag scaffolding | 📋 PENDING | ~30 diffs | 10 modified |
+| 1 | Stub energye+CEF, hello world | 📋 PENDING | ~600 | 4 new |
+| 2 | Asset server bridge | 📋 PENDING | ~500 | 3 new |
+| 3 | IPC JS↔Go via CefV8Handler | 📋 PENDING | ~400 | 2 new |
+| 4 | Devtools/permisos/DnD/menu | 📋 PENDING | ~500 | modifications |
+| 5 | doctor-ng + packaging | 📋 PENDING | ~150 | 8 modified |
+| 6 | Examples + CI + docs | 📋 PENDING | varies | 1 new + tasks |
+
+### Files inventory
+
+See `history/PLAN.md` §3 for the full file-by-file plan.
+
+### Build matrix
+
+| Tag set | Backend | Status |
+|---|---|---|
+| (none) | WebKitGTK 6.0 + GTK4 | ✅ Untouched |
+| `-tags gtk3` | WebKit2GTK 4.1 + GTK3 (legacy) | ✅ Untouched |
+| `-tags server` | Headless HTTP | ✅ Untouched |
+| `-tags cef` | CEF 109 + GTK4 host | 🚧 In progress |
+
+### Session log
+
+#### 2026-07-09 (Session C.0)
+- Cloned wails v3 (master, alpha2.117) at `/home/nicolas/Documentos/GitHub/Wails-CEF`
+- Created branch `feat/linux-cef`
+- Created plan at `history/PLAN.md` (full 6-phase plan)
+- Confirmed `energye/energy v1.109.1184` available in module cache
+- Inventoried all `*_linux*.go` files: 10 require build-tag modification to add `!cef`
