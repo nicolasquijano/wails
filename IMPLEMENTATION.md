@@ -1223,6 +1223,58 @@ No more `GPU process isn't usable` and no `X BadWindow`.
 - `v3/pkg/application/cef_app_stub.go` — new file with the
   `cef.App` that injects the GPU/runtime-style switches.
 
+#### 2026-07-10 (Session C.0j — reparent to GtkBox, finalize)
+
+**Goal**: Restore the reparent to `GtkBox` (the original Phase 1
+architecture) and finalize the branch for review.
+
+**What changed**:
+- The CEF view is now reparented into the supplied `GtkBox`
+  (previously reparented to the top-level `GtkWindow` to dodge a
+  `MatchError` that was being thrown when CEF tried to create a
+  child window as a sibling of the box). The earlier commit moved
+  the call site to create the CEF view without `WindowInfo.ParentWindow`
+  (letting CEF create a top-level X11 window first, then reparenting).
+  That removed the `MatchError`, so we can now safely hand the
+  `GtkBox` to the reparent helper — `cef_attach_to_gtk_widget`
+  walks `widget → GtkNative → surface → XID` and correctly resolves
+  the box's parent XID to the enclosing `GtkWindow`.
+- `history/PR_CEF.md` — full PR description with verification
+  matrix, follow-ups, reviewer checklist.
+- `history/CEF_HANDOFF.md` — final continuation doc reflecting the
+  post-commit state.
+
+**Verification** (latest smoke test, CEF 147 standard):
+```
+$ DISPLAY=:1 GDK_BACKEND=x11 CEF_DIR=~/cef147std/.../Release /tmp/cef-hello
+[cefInit] post-init default display backend=:1
+[cefCreateBrowserInWidget] url="wails://localhost/" gtkWindowXID=60817416
+[cefCreateBrowserInWidget] returned browser=true
+[cefCreateBrowserInWidget] browser view XID=69206020
+[OnBeforeResourceLoad] url="wails://localhost/" isAsset=true
+[linuxWebviewWindow.run] after show
+```
+
+- `_NET_CLIENT_LIST` registers the CEF window as the active window.
+- `WM_STATE: Normal`, `WM_HINTS: accepts input`, `OpaqueRegion: 0,0,800,600`.
+- `xprop -id <active window>` confirms `_GTK_WINDOW_OBJECT_PATH:
+  /io/wails/cef_hello/window/1`.
+- `/tmp/wails-cef.log` contains only warnings (NVIDIA vaapi, OAuth
+  client ID, user-type filter). No `MatchError`, no
+  `FATAL:content/browser/gpu/...`, no `X BadWindow`.
+- CEF pipeline runs at ~115% CPU while idle (software rendering
+  via `--in-process-gpu`).
+- The screen capture tooling (`xwininfo`, `ffmpeg -f x11grab`) returns
+  black for this XWayland session — the rendering happens on the
+  real GPU compositor, which is not exposed via the X capture
+  path. Visual verification is pending on a real X11 session.
+
+**Branch state** (commit 385ca06f8):
+- 2 commits ahead of `origin/feat/linux-cef`.
+- Working tree clean.
+- All 4 build modes compile; `pkg/application` tests pass in default,
+  `gtk3`, and `cef` modes.
+
 #### 2026-07-10 (Session C.0h — Phases 5 + 6)
 
 **Goal**: Wrap up doctor-ng integration, examples, and documentation
