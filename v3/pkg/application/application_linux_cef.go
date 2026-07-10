@@ -191,6 +191,10 @@ func newPlatformApp(parent *App) *linuxApp {
 	// window.wails.* land in the same router as HTTP/WS transports.
 	setCefMessageProcessor(parent)
 
+	// Cache flags/environment for OnDocumentAvailableInMainFrame to
+	// inject into the V8 context.
+	setCefEnvironment(parent)
+
 	// Install the V8 extension BEFORE any browser is created. CEF only
 	// loads extensions that were registered before the browser's
 	// render process started.

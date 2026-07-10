@@ -142,11 +142,13 @@ func (w *linuxWebviewWindow) forceReload() {
 	w.browser.Reload()
 }
 
-// execJS executes JavaScript in the browser's main frame.
+// execJS executes JavaScript in the browser's main frame. This is
+// the primary Go→JS bridge for one-off script execution (used by
+// wails.WebviewWindow.ExecJS, wails.DispatchWailsEvent, etc.).
 //
-// In Phase 1 this is a no-op (CEF browser not yet wired to message
-// pipeline). Phase 3 will route calls through the cefBridge so the
-// messageprocessor sees them.
+// Phase 4: routes via CefFrame::ExecuteJavaScript so the script runs
+// in the right V8 context. The empty scriptURL means the script
+// doesn't appear in DevTools' source list.
 func (w *linuxWebviewWindow) execJS(js string) {
 	if w.browser == nil {
 		return

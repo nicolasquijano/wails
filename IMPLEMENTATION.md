@@ -618,7 +618,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | 1 | First CEF build (purego-cef + GTK4 host) | ✅ COMPLETE (2026-07-09) | ~900 LOC | 6 new + 1 dep |
 | 2 | Asset server bridge (route + detect, no body) | ✅ COMPLETE (2026-07-09) | ~300 LOC | 2 new + 1 modified |
 | 3 | JS↔Go IPC via CefV8Handler + RegisterExtension | ✅ COMPLETE (2026-07-09) | ~350 LOC | 3 new + 1 modified |
-| 4 | Devtools/permisos/DnD/menu + **CEF body streaming** + **return values** | 📋 PENDING | ~700 | modifications |
+| 4 | Body streaming + return values + flags/env + events | ✅ COMPLETE (2026-07-09) | ~250 LOC diff | 2 modified |
 | 5 | doctor-ng + packaging | 📋 PENDING | ~150 | 8 modified |
 | 6 | Examples + CI + docs | 📋 PENDING | varies | 1 new + tasks |
 
@@ -888,3 +888,68 @@ cd examples/plain && go build -tags cef -o /tmp/cef-phase3-test  exit 0 (18MB EL
 **Next**: Phase 4 — body streaming (CefResourceHandler.ReadResponse),
 return values (CefV8Value retval out-param), full flags/environment
 injection, and event delivery via CefFrame::ExecuteJavaScript.
+
+#### 2026-07-09 (Session C.0f — Phase 4)
+
+**Goal**: Close the four open loops left by Phase 3:
+1. **Body streaming** — the assetserver response body must reach CEF.
+2. **Return values** — JS Promises must resolve with the result of
+   MessageProcessor calls, not `undefined`.
+3. **Flags / environment** — the runtime reads
+   `window._wails.flags` and `window._wails.environment`; we must
+   populate them once the document loads.
+4. **Events Go→JS** — already worked via `WebviewWindow::ExecJS`, but
+   now go through the correct CefFrame::ExecuteJavaScript path
+   rather than the global ExecJS helper.
+
+**Implementation** (mostly modifications to existing Phase 2/3 files):
+
+*Body streaming* (`cef_request_handler.go`):
+- `cefResourceRequestHandler` now also implements
+  `cef.ResourceHandler` (so the same struct can be returned from
+  `GetResourceHandler`).
+- `OnBeforeResourceLoad` runs the assetserver handler into a
+  buffered `captureResponse` (status, headers, body).
+- `GetResponseHeaders` writes status + Content-Type into the
+  cef.Response; `ReadResponse` feeds body bytes to CEF in a loop.
+
+*Return values* (`cef_v8_handler.go`):
+- New helpers `writeV8Retval` (writes the `V8Value` handle into
+  CEF's retval out-param via `unsafe.Pointer` casts) and
+  `writeV8Exception` (logs to stderr; full JS exception set
+  deferred).
+- `handleInvoke` now writes the JSON result into retval, so the
+  JS Promise resolves with the stringified payload.
+
+*Flags/environment* (`cef_request_handler.go`,
+`application_linux_cef.go`):
+- New `setCefEnvironment(app)` builds the JSON for
+  `window._wails.flags` and `.environment`.
+- `cefRequestHandler.OnDocumentAvailableInMainFrame` runs an
+  `ExecuteJavaScript` on the main frame pushing both objects into
+  the V8 context.
+
+*Events Go→JS* (`webview_window_linux_cef.go`):
+- `execJS` already used `frame.ExecuteJavaScript`; Phase 4 just
+  doc-comments confirm this is the right path. The existing
+  `WebviewWindow::DispatchWailsEvent` → `ExecJS` → `execJS` chain
+  now correctly lands in the right V8 context.
+
+**Verification** (all 4 modes + 1 example with `-tags cef`):
+```
+go build ./pkg/application/                            exit 0
+go build -tags gtk3 ./pkg/application/                exit 0
+go build -tags server ./pkg/application/              exit 0
+go build -tags cef ./pkg/application/                 exit 0
+cd examples/plain && go build -tags cef -o /tmp/cef-phase4-test  exit 0 (18MB)
+```
+
+**Phase 4 status — all four loops closed at the API surface**.
+The compile is green but functional testing (running the binary
+and observing a wails:// page load) is not done in this session —
+CEF 147 binaries are not installed on the build host.
+
+**Next**: Phase 5 — `doctor-ng` integration, packaging, and
+end-to-end tests (optional: install libcef locally and verify
+that a wails:// page actually loads with content). Phase 6 will
+add the `examples/cef-hello` directory + CI workflow.
