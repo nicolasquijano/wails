@@ -1110,6 +1110,119 @@ subsequent `run()` returns the original initialization error cleanly. The CEF
 initialization flag is set only after `cef.Init` succeeds, so a failed first
 attempt cannot make a later call falsely report success.
 
+#### 2026-07-10 (Session C.0j — CEF 147 end-to-end smoke test)
+
+**Goal**: Run `v3/examples/cef-hello` against CEF 147 and verify the
+browser is created, paints, and serves `wails://` content.
+
+**Environment**:
+- CEF 147 standard distribution at
+  `~/cef147std/cef_binary_147.0.14+..._linux64/Release`
+- XDG session = `wayland` (KDE Plasma), X11 available via XWayland
+- `GDK_BACKEND=x11` set explicitly in the test harness
+
+**Findings & fixes**:
+
+1. **`gdk_x11_surface_get_xid` returned 0 for the GtkBox** —
+   child widgets in GTK4 have no native surface of their own, so
+   `gtk_widget_get_native(vbox)` → `gtk_native_get_surface` →
+   `gdk_x11_surface_get_xid` always yielded 0. Fixed by realizing
+   the top-level `GtkApplicationWindow` and reading ITS X11 handle
+   (window → `GtkNative` → `GdkSurface` → XID). The CEF browser
+   nests as a child of the GtkWindow via `WindowInfo.ParentWindow`.
+
+2. **Forced GDK backend to X11** — on a Wayland session, GTK was
+   ignoring `GDK_BACKEND=x11` because CEF's library has internal
+   GTK symbols that initialise the display before our Go code can
+   act. The init() function in `application_linux_cef.go` now:
+   - sets `GDK_BACKEND=x11` if not already set,
+   - unsets `WAYLAND_DISPLAY` (modern GTK4 prefers Wayland even
+     when GDK_BACKEND=x11 is set, unless WAYLAND_DISPLAY is gone),
+   - calls `gtk_init()` ourselves BEFORE `cef.Init` so the
+     X11 display is open and CEF can reuse it.
+
+3. **XID=1 (root window) for the CEF view** — CEF 147 defaults to
+   the "Chrome" runtime, which doesn't honour
+   `WindowInfo.ParentWindow` the same way as the legacy runtime.
+   Set `wi.RuntimeStyle = cef.RuntimeStyleAlloy` (the runtime the
+   reference CEF GTK sample uses). The browser view's XID is now a
+   valid X11 window handle.
+
+4. **X `BadWindow` on `XReparentWindow`** — CEF's X display
+   connection is not always interchangeable with GDK's, so manual
+   reparent into the GtkBox failed at runtime. Skipped the reparent
+   entirely; `BrowserHostCreateBrowserSync` already nests CEF's
+   window inside the GtkWindow, so the reparent was redundant for
+   visual correctness.
+
+5. **GPU process aborts the browser** — Chromium's GPU sandbox
+   refused to start under the forced-X11 environment and crashed
+   with `FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:417`
+   "GPU process isn't usable. Goodbye." Fixed by installing a
+   `cef.App` whose `OnBeforeCommandLineProcessing` appends:
+   - `--disable-gpu`
+   - `--disable-software-rasterizer`
+   - `--in-process-gpu`
+   - `--runtime-style=alloy`
+
+6. **Subprocess detection short-circuited CEF** — the prior
+   init() detected `--type=gpu-process` and called `os.Exit(0)`
+   BEFORE CEF's `cef_execute_process` had a chance to register
+   itself as the subprocess handler. The GPU process would exit
+   without ever telling Chromium it was the GPU. Now we call
+   `cef.MaybeExitSubprocess()` instead, which routes through
+   CEF's `CefExecuteProcess` API and exits with the proper
+   code CEF returns.
+
+7. **GTK main loop starving CEF events** — CEF was configured
+   with `MultiThreadedMessageLoop: false` and
+   `ExternalMessagePump: true`, but no one was calling
+   `cef.DoMessageLoopWork()`. Installed a `g_idle_add_full` source
+   on the GTK default main context that pumps the CEF message
+   loop on every idle tick (priority `G_PRIORITY_DEFAULT_IDLE`).
+
+8. **No-op `setSize` / `setDefaultSize` stubs** — both were
+   Phase 1 stubs that ignored their arguments, so the GTK host
+   window was created with default (1×1) size. Wired them to
+   `gtk_window_set_default_size` and `gtk_widget_set_size_request`.
+
+**Verification** (CEF 147 standard, `~/cef147std/...`):
+
+```
+go build -tags cef -o /tmp/cef-hello .   # examples/cef-hello   exit 0
+go test -tags cef ./pkg/application      exit 0 (ok)
+go test            ./pkg/application      exit 0 (ok)
+go test -tags gtk3 ./pkg/application      exit 0 (ok)
+for tags in '' gtk3 server cef; do
+  cd examples/plain && go build -tags "$tags" -o "/tmp/wails-$tags" .
+done                                       # all 4 modes build
+```
+
+`/tmp/wails-cef-debug.log` now shows the full happy path:
+```
+[cefInit] env GDK_BACKEND="x11" WAYLAND_DISPLAY="" DISPLAY=":1"
+[cefInit] post-init default display backend=:1
+[linuxWebviewWindow.run] about to call cefCreateBrowserInWidget
+[cefCreateBrowserInWidget] url="wails://localhost/" parentXID=...
+[cefCreateBrowserInWidget] returned browser=true
+[OnBeforeResourceLoad] url="wails://localhost/" isAsset=true
+[linuxWebviewWindow.run] after show
+```
+
+No more `GPU process isn't usable` and no `X BadWindow`.
+
+**Files changed (this session)**:
+- `v3/pkg/application/application_linux_cef.go` — init() now
+  enforces X11 and routes subprocess detection through CEF.
+- `v3/pkg/application/linux_cgo_cef.go` — `cefInit` installs
+  message pump, uses `cef.InitWithApp`, sizes windows, fixes
+  `cefCreateBrowserInWidget` to use the GtkWindow's XID, drops
+  the `XReparentWindow` step, sets `RuntimeStyleAlloy`.
+- `v3/pkg/application/webview_window_linux_cef.go` — `setSize` and
+  `setDefaultSize` are real implementations now.
+- `v3/pkg/application/cef_app_stub.go` — new file with the
+  `cef.App` that injects the GPU/runtime-style switches.
+
 #### 2026-07-10 (Session C.0h — Phases 5 + 6)
 
 **Goal**: Wrap up doctor-ng integration, examples, and documentation

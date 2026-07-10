@@ -128,6 +128,7 @@ func (w *linuxWebviewWindow) run() {
 
 	// 4. Create CEF browser attached to the GtkBox.
 	w.browser = cefCreateBrowserInWidget(
+		unsafe.Pointer(w.window),
 		unsafe.Pointer(w.vbox),
 		w.parent.options.URL,
 	)
@@ -135,6 +136,7 @@ func (w *linuxWebviewWindow) run() {
 
 	// 5. Show the GTK window.
 	w.show()
+	debugLog("[linuxWebviewWindow.run] after show")
 }
 
 func (w *linuxWebviewWindow) show() {
@@ -257,11 +259,13 @@ func (w *linuxWebviewWindow) copy() {
 	// No-op for Phase 1.
 }
 
-// setSize is a Phase 1 stub. Real implementation lands in Phase 4
-// using gtk_window_set_default_size + resize.
+// setSize resizes the GTK host window. Used by window option
+// setters that change the client area after creation.
 func (w *linuxWebviewWindow) setSize(width, height int) {
-	_ = width
-	_ = height
+	if w.window == nil || width <= 0 || height <= 0 {
+		return
+	}
+	cefSetWindowSize(w.window, width, height)
 }
 
 // setURL is a Phase 1 stub. Real implementation in Phase 2+ uses
@@ -295,10 +299,13 @@ func (w *linuxWebviewWindow) setBackgroundColour(colour RGBA) {
 // setTransparent is a Phase 1 stub. Real implementation in Phase 4.
 func (w *linuxWebviewWindow) setTransparent() {}
 
-// setDefaultSize is a Phase 1 stub.
+// setDefaultSize sets the GTK host window's default size. GTK
+// applies this when the window is first realised.
 func (w *linuxWebviewWindow) setDefaultSize(width, height int) {
-	_ = width
-	_ = height
+	if w.window == nil || width <= 0 || height <= 0 {
+		return
+	}
+	cefSetWindowDefaultSize(w.window, width, height)
 }
 
 func (w *linuxWebviewWindow) setAlwaysOnTop(alwaysOnTop bool) {

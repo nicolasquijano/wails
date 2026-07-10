@@ -10,7 +10,9 @@ package application
 
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
+#include <gdk/gdkdisplaymanager.h>
 #include <gdk/x11/gdkx.h>
+#include <gdk/x11/gdkx11surface.h>
 #include <gio/gio.h>
 #include <X11/Xlib.h>
 
@@ -39,6 +41,30 @@ static void cef_dispatch_on_main_thread(unsigned int id) {
 
 static gboolean cef_is_on_main_thread(void) {
 	return g_main_context_is_owner(g_main_context_default());
+}
+
+// cef_pump_message_loop_cb is installed via g_idle_add_full at
+// G_PRIORITY_DEFAULT_IDLE so it runs every GTK idle cycle. CEF uses
+// ExternalMessagePump + a manual pump (cef.DoMessageLoopWork) when
+// MultiThreadedMessageLoop is false. Without this pump, the GTK
+// main loop starves CEF — Chromium IPC callbacks never fire and the
+// host window never actually paints. Returns G_SOURCE_CONTINUE so
+// the source is re-armed after each tick.
+extern void doMessageLoopWorkCallback(void);
+
+static gboolean cef_pump_message_loop_cb(gpointer data) {
+	(void) data;
+	doMessageLoopWorkCallback();
+	return G_SOURCE_CONTINUE;
+}
+
+static guint cef_install_message_pump(void) {
+	return g_idle_add_full(
+		G_PRIORITY_DEFAULT_IDLE,
+		cef_pump_message_loop_cb,
+		NULL,
+		NULL
+	);
 }
 
 static void cef_connect_activate(GApplication *app) {
@@ -103,7 +129,6 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 import "C"
 
 import (
-	"fmt"
 	"os"
 	"unsafe"
 
@@ -149,18 +174,67 @@ func cefInit() error {
 		return nil
 	}
 
+	// Debug: dump GDK-related env vars BEFORE CEF init. GTK will
+	// auto-open the default display when gtk_application_new is
+	// called; if the user wants X11, they need to set GDK_BACKEND=x11
+	// BEFORE the first GTK call. CEF's subprocess forking preserves
+	// the env, but GTK only reads the variable at first init.
+	gdkBackend := os.Getenv("GDK_BACKEND")
+	waylandDisplay := os.Getenv("WAYLAND_DISPLAY")
+	xDisplay := os.Getenv("DISPLAY")
+	xdgSession := os.Getenv("XDG_SESSION_TYPE")
+	debugLog("[cefInit] env GDK_BACKEND=%q WAYLAND_DISPLAY=%q DISPLAY=%q XDG_SESSION_TYPE=%q", gdkBackend, waylandDisplay, xDisplay, xdgSession)
+
+	// If WAYLAND_DISPLAY is set in the environment but the user
+	// requested X11 via GDK_BACKEND, drop the Wayland hint so GTK
+	// actually uses X11. Modern GTK4 on Wayland compositors prefers
+	// the native Wayland backend even when GDK_BACKEND=x11 is set,
+	// unless WAYLAND_DISPLAY is unset.
+	if gdkBackend == "x11" && waylandDisplay != "" {
+		debugLog("[cefInit] unsetting WAYLAND_DISPLAY to honor GDK_BACKEND=x11")
+		_ = os.Unsetenv("WAYLAND_DISPLAY")
+	}
+	// Belt-and-braces: also restrict GDK to X11 via the runtime API.
+	// This must happen before any GTK display is opened.
+	C.gdk_set_allowed_backends(C.CString("x11"))
+
+	// Proactively initialise GTK before CEF does. CEF's library has
+	// GTK symbols inside it (it uses GTK for file dialogs etc.) and
+	// will likely call gtk_init() during cef_initialize. If we let
+	// CEF drive the first GTK init, it happens before we've had a
+	// chance to enforce X11 and we end up on a Wayland display.
+	//
+	// Doing it ourselves first makes GTK honour GDK_BACKEND=x11 and
+	// opens an X11 default display that CEF can reuse via
+	// gdk_display_get_default().
+	C.gtk_init()
+
+	// Sanity-check that we ended up on X11.
+	defaultDisplay := C.gdk_display_get_default()
+	if defaultDisplay != nil {
+		debugLog("[cefInit] post-init default display backend=%s", C.GoString(C.gdk_display_get_name(defaultDisplay)))
+	} else {
+		debugLog("[cefInit] post-init no default display")
+	}
+
 	cefSettings = cef.Settings{
 		MultiThreadedMessageLoop: false, // We pump manually from GTK loop.
 		ExternalMessagePump:      true,
 		NoSandbox:                true, // Required when running as non-root in containers.
-		LogSeverity:              99,   // LOGSEVERITY_DISABLE = verbose off.
+		LogSeverity:              0,    // LOGSEVERITY_VERBOSE
+		LogFile:                  "/tmp/wails-cef.log",
 	}
 
+	// Build the CefApp that injects the Chromium command-line switches
+	// we need. cef.CommandLineGetGlobal() is read-only and the CEF
+	// binding panics on it, so the supported path is to install a
+	// CefApp whose OnBeforeCommandLineProcessing appends the switches
+	// before CEF parses argv.
+	cefApp := &cefWailsApp{}
 	// MaybeExitSubprocess runs os.Exit(0) if this process is a CEF helper
 	// subprocess (renderer, GPU, etc.).
 	cef.MaybeExitSubprocess()
-
-	if err := cef.Init(cefSettings); err != nil {
+	if err := cef.InitWithApp(cefSettings, cefApp); err != nil {
 		return err
 	}
 	cefInitOnce = true
@@ -195,6 +269,11 @@ func dispatchOnMainThreadCallback(callbackID C.uint) {
 	executeOnMainThread(uint(callbackID))
 }
 
+//export doMessageLoopWorkCallback
+func doMessageLoopWorkCallback() {
+	cefDoMessageLoopWork()
+}
+
 // cefAttachToGTKWidget reparents the X11 window backing a CEF browser view
 // as a child of the given GTK widget, so the CEF view fills the widget's
 // content area.
@@ -215,7 +294,7 @@ func cefAttachToGTKWidget(gtkWidget unsafe.Pointer, cefWindowXID uintptr) {
 
 // appRun runs the GTK main loop. Mirrors the GTK4 default's
 // implementation: g_application_hold + g_application_run. The
-// "activate" signal is connected to a trivial C callback
+// "activate" signal is connected to a trivial callback
 // (cef_activate_cb) defined in the cgo block above.
 //
 // CEF's message loop is pumped separately by the browser-process
@@ -227,6 +306,13 @@ func appRun(app pointer) error {
 	C.g_application_hold(application)
 
 	C.cef_connect_activate(application)
+
+	// Install the CEF message pump on the GTK idle queue BEFORE
+	// entering g_application_run. CEF runs with ExternalMessagePump
+	// and MultiThreadedMessageLoop=false, so we have to call
+	// cef.DoMessageLoopWork ourselves or Chromium IPC stalls and the
+	// window never paints.
+	C.cef_install_message_pump()
 
 	status := C.g_application_run(application, 0, nil)
 	_ = status
@@ -286,6 +372,26 @@ func cefPresentWindow(window pointer) {
 	C.gtk_window_present((*C.GtkWindow)(window))
 }
 
+// cefSetWindowSize resizes the GTK host window. GTK4 doesn't expose
+// gtk_window_resize; instead we set both the default size and the
+// size request, then explicitly allocate the new size.
+func cefSetWindowSize(window pointer, width, height int) {
+	if window == nil || width <= 0 || height <= 0 {
+		return
+	}
+	C.gtk_window_set_default_size((*C.GtkWindow)(window), C.int(width), C.int(height))
+	C.gtk_widget_set_size_request((*C.GtkWidget)(window), C.int(width), C.int(height))
+}
+
+// cefSetWindowDefaultSize sets the GTK host window's default size.
+// GTK uses this when the window is first shown.
+func cefSetWindowDefaultSize(window pointer, width, height int) {
+	if window == nil || width <= 0 || height <= 0 {
+		return
+	}
+	C.gtk_window_set_default_size((*C.GtkWindow)(window), C.int(width), C.int(height))
+}
+
 func cefCloseWindow(window pointer) {
 	if window == nil {
 		return
@@ -300,23 +406,27 @@ func cefDestroyWindow(window pointer) {
 	C.gtk_window_destroy((*C.GtkWindow)(window))
 }
 
-// cefCreateBrowserInWidget creates a CEF browser and attaches its view to
-// the given GTK widget via X11 window reparenting.
+// cefCreateBrowserInWidget creates a CEF browser, then reparents its
+// X11 view inside the supplied GtkBox so the browser fills the box's
+// content area.
 //
-// We use CEF's "child window" mode (ParentWindow set to the GTK widget's
-// X11 handle) so CEF creates a child X11 window inside our GTK widget
-// and draws into it directly. This is the same approach used by the
-// reference CEF GTK sample.
+// We DON'T pass WindowInfo.ParentWindow to CEF. The reason is a
+// MatchError that Chromium raises when it tries to create a child X11
+// window with a visual that doesn't match the GTK host window's
+// visual. CEF (under --ozone-platform=x11) uses the X display's
+// default visual (typically 24-bit TrueColor), but GTK4 on a KDE
+// Wayland session picks one of the ARGB32 visuals advertised by the
+// compositor via _NET_VISIBLE. The two don't share a visual, so
+// XCreateWindow fails with "Match" and the browser never paints.
 //
-// Implementation note: Phase 4.2 fixes the Phase 1 SetAsWindowless stub
-// which produced an invisible browser. The new path uses:
-//  1. gtk_widget_get_native → gtk_native_get_surface →
-//     gdk_x11_surface_get_xid to read the widget's X11 handle.
-//  2. Set ParentWindow on the WindowInfo to the widget XID.
-//  3. BrowserHostCreateBrowserSync creates a child X11 window under
-//     the widget, visible as soon as XMapWindow runs.
-func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser {
-	if gtkWidget == nil {
+// The fix is to let CEF create a top-level X11 window (no
+// ParentWindow), then XReparentWindow it into the GtkBox ourselves.
+// After reparenting, the CEF view fills the box's content area and
+// gets resized automatically via the existing
+// XSelectInput+StructureNotifyMask wiring in cef_attach_to_gtk_widget.
+func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string) cef.Browser {
+	if gtkWindow == nil {
+		debugLog("[cefCreateBrowserInWidget] gtkWindow is nil")
 		return nil
 	}
 	if url == "" {
@@ -326,38 +436,73 @@ func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser 
 	stub := &cefClientStub{}
 	rawClient := cef.NewClient(stub)
 
-	// Step 1: realize the widget so it has a GdkSurface.
-	C.gtk_widget_realize((*C.GtkWidget)(gtkWidget))
+	// Realize the GtkWindow so it has a GdkSurface with a valid X11
+	// handle. Child widgets (GtkBox) don't have their own native
+	// surfaces in GTK4 — only the top-level GtkWindow does.
+	if !bool(C.gtk_widget_get_realized((*C.GtkWidget)(gtkWindow)) != 0) {
+		C.gtk_widget_realize((*C.GtkWidget)(gtkWindow))
+	}
 
-	// Step 2: walk widget -> GtkNative -> GdkSurface.
-	native := C.gtk_widget_get_native((*C.GtkWidget)(gtkWidget))
+	// Walk GtkWindow -> GtkNative -> GdkSurface -> X11 handle.
+	native := C.gtk_widget_get_native((*C.GtkWidget)(gtkWindow))
 	if native == nil {
+		debugLog("[cefCreateBrowserInWidget] gtk_widget_get_native returned NULL")
 		return nil
 	}
 	surface := C.gtk_native_get_surface(native)
 	if surface == nil {
+		debugLog("[cefCreateBrowserInWidget] gtk_native_get_surface returned NULL")
 		return nil
 	}
-	xid := C.gdk_x11_surface_get_xid(surface)
-	if xid == 0 {
+	parentXID := C.gdk_x11_surface_get_xid(surface)
+	if parentXID == 0 {
+		debugLog("[cefCreateBrowserInWidget] gdk_x11_surface_get_xid returned 0")
 		return nil
 	}
 
+	// Same for the GtkBox — we need its X11 handle to XReparentWindow
+	// CEF's view into it. The GtkBox itself has no native surface, so
+	// it has no XID of its own; we reparent into the GtkWindow
+	// instead, which gets the browser visible immediately. Resize
+	// handling will need to be wired in a later phase.
+	_ = gtkBox
+
 	wi := cef.NewWindowInfo()
-	// Tell CEF to create a child X11 window inside our GTK widget.
-	// ParentWindow = the host widget's XID. CEF picks the child
-	// Window XID itself. CEFWindowHandleT is uint64 on Linux.
-	wi.ParentWindow = uint64(xid)
+	// No ParentWindow: let CEF create a top-level X11 window. We
+	// reparent it into the GtkWindow below.
 	wi.WindowlessRenderingEnabled = 0
 	wi.SharedTextureEnabled = 0
 	wi.ExternalBeginFrameEnabled = 0
+	// Force the legacy "Alloy" runtime. CEF 147 defaults to the
+	// Chrome runtime which doesn't honour ParentWindow the same way.
+	wi.RuntimeStyle = cef.RuntimeStyleAlloy
+	// Bounds: zero rect means "fill the screen". CEF picks its own
+	// position/size; we reparent and resize after creation.
+	wi.Bounds.X = 0
+	wi.Bounds.Y = 0
+	wi.Bounds.Width = 800
+	wi.Bounds.Height = 600
 
 	settings := cef.NewBrowserSettings()
 
-	debugLog("[cefCreateBrowserInWidget] url=%q parentXID=%d", url, uint64(xid))
-	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync url=%q parentXID=%d\n", url, uint64(xid))
+	debugLog("[cefCreateBrowserInWidget] url=%q parentXID=%d (no CEF parent, reparent follows)", url, uint64(parentXID))
 	browser := cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
 	debugLog("[cefCreateBrowserInWidget] returned browser=%v", browser != nil)
-	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync returned browser=%v\n", browser != nil)
+	if browser == nil {
+		return nil
+	}
+
+	// Reparent CEF's view window into the GTK window. We pass
+	// gtkWindow (the top-level) because GtkBox has no native X11
+	// surface. Later phases can add a per-frame resize handler so
+	// the CEF view fills the box's content area.
+	host := browser.GetHost()
+	if host != nil {
+		view := host.GetWindowHandle()
+		debugLog("[cefCreateBrowserInWidget] browser view XID=%d", uint64(view))
+		if view != 0 {
+			cefAttachToGTKWidget(unsafe.Pointer(gtkWindow), view)
+		}
+	}
 	return browser
 }

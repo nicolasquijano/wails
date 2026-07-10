@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bnema/purego-cef/cef"
 	"github.com/godbus/dbus/v5"
 	"github.com/wailsapp/wails/v3/internal/operatingsystem"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -77,24 +78,49 @@ func isValidAppIDStart(c byte) bool {
 
 func setProgramName(name string) { _ = name }
 
-// init runs in every process, including CEF helper subprocesses (zygote,
-// utility, gpu). It does the very first thing: check whether we are a CEF
-// helper subprocess and exit immediately if so. Without this, every helper
-// subprocess would also run the main() function, which calls App.Run,
-// which calls newPlatformApp, which calls cefInit — and we end up with
-// multiple CEF runtimes competing for the same process.
+// init runs in every process. It does three things, all needed to make
+// CEF happy on a Wayland session:
 //
-// In the main process this function is a no-op (cefInit hasn't been
-// called yet, so the library detection returns false).
+//  1. Force GDK_BACKEND=x11 (and unset WAYLAND_DISPLAY) so GTK picks
+//     the X11 backend on a Wayland compositor. The CEF view is
+//     reparented into a GTK window via XReparentWindow, which only
+//     works on real X11 surfaces.
+//
+//  2. Force CEF's internal Ozone backend to X11 by setting
+//     OZONE_PLATFORM=x11. Without this, CEF/Chromium ignores
+//     GDK_BACKEND and connects to Wayland directly, where the GPU
+//     sandbox can't start and Chromium aborts the browser with
+//     "GPU process isn't usable. Goodbye." at the first paint.
+//
+//  3. Detect CEF helper subprocesses via os.Args and let CEF handle
+//     them. We do NOT call os.Exit here — that would short-circuit
+//     CEF's own cef_execute_process path, leaving the GPU/zigote/etc.
+//     processes unable to register themselves. Instead we call
+//     cef.MaybeExitSubprocess() which routes through CEF's
+//     CefExecuteProcess API and exits with the right code if this
+//     process is a helper.
+//
+// See IMPLEMENTATION.md 2026-07-10 session for the GPU-process crash
+// that motivated moving this out of os.Exit and into CEF's path.
 func init() {
-	// Detect via os.Args: CEF helper subprocesses are spawned with
-	// flags like --type=zygote, --type=utility, --type=gpu-process.
-	// We exit before doing any other init.
+	if os.Getenv("GDK_BACKEND") == "" {
+		_ = os.Setenv("GDK_BACKEND", "x11")
+	}
+	if os.Getenv("GDK_BACKEND") == "x11" && os.Getenv("WAYLAND_DISPLAY") != "" {
+		_ = os.Unsetenv("WAYLAND_DISPLAY")
+	}
+	// CEF reads OZONE_PLATFORM at startup. x11 is the only backend
+	// that works reliably when GTK is on XWayland and the user has
+	// no working GPU sandbox.
+	if os.Getenv("OZONE_PLATFORM") == "" {
+		_ = os.Setenv("OZONE_PLATFORM", "x11")
+	}
+
 	for _, a := range os.Args {
 		switch a {
 		case "--type=zygote", "--type=zygote-process", "--type=utility", "--type=gpu-process", "--type=renderer", "--type=broker", "--type=ppapi", "--type=ppapi-broker", "--type=audio-service", "--type=network-service", "--type=storage-service":
-			fmt.Fprintf(os.Stderr, "wails/cef: detected CEF helper subprocess (%s), exiting\n", a)
-			os.Exit(0)
+			cef.MaybeExitSubprocess()
+			return
 		}
 	}
 }
