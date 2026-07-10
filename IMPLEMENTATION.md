@@ -616,9 +616,9 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 |---|---|---|---|---|
 | 0 | Build tag scaffolding | ✅ COMPLETE (2026-07-09) | ~15 diffs | 14 modified |
 | 1 | First CEF build (purego-cef + GTK4 host) | ✅ COMPLETE (2026-07-09) | ~900 LOC | 6 new + 1 dep |
-| 2 | Asset server bridge | 📋 PENDING | ~500 | 3 new |
+| 2 | Asset server bridge (route + detect, no body) | ✅ COMPLETE (2026-07-09) | ~300 LOC | 2 new + 1 modified |
 | 3 | IPC JS↔Go via CefV8Handler | 📋 PENDING | ~400 | 2 new |
-| 4 | Devtools/permisos/DnD/menu | 📋 PENDING | ~500 | modifications |
+| 4 | Devtools/permisos/DnD/menu + **CEF body streaming** | 📋 PENDING | ~700 | modifications |
 | 5 | doctor-ng + packaging | 📋 PENDING | ~150 | 8 modified |
 | 6 | Examples + CI + docs | 📋 PENDING | varies | 1 new + tasks |
 
@@ -746,3 +746,71 @@ cd v3/examples/plain && go build -tags gtk3 -o /tmp/plain-gtk3      . exit 0 (16
 **Phase 1 ✅ COMPLETE**. The build pipeline works end-to-end. Next: Phase 2
 implements the asset server scheme handler so CEF can load `wails://` URLs
 from the embedded frontend.
+
+#### 2026-07-09 (Session C.0d — Phase 2 partial)
+
+**Goal**: Wire the CEF request pipeline into the assetserver so that
+`wails://*` and `http://wails.localhost/*` URLs reach the existing
+`assetserver.Handler`. Full body streaming is deferred to Phase 4 (CEF's
+`cef.Response` has no `SetBody`; serving bodies requires a parallel
+`CefResourceHandler::ReadResponse` callback).
+
+**Architecture decision**: The CEF bridge lives in `pkg/application/`
+(not `internal/assetserver/webview/`) so that the assetserver stays
+unaware of CEF. The bridge adapts between CEF's inbound port
+(`cef.Request`) and the existing `webview.Request` interface that the
+assetserver handler already accepts.
+
+**Files created** (2 new, ~300 LOC):
+- `v3/pkg/application/cef_request_bridge.go` — `cefRequest` (wraps
+  `cef.Request` to satisfy `webview.Request`) and `cefResponseWriter`
+  (wraps `cef.Response` to satisfy `webview.ResponseWriter`).
+- `v3/pkg/application/cef_request_handler.go` — `cefRequestHandler`
+  implements `cef.RequestHandler`; `cefResourceRequestHandler` implements
+  `cef.ResourceRequestHandler`. The handler detects
+  `wails://`, `http://wails.localhost/`, and `https://wails.localhost/`
+  URLs; non-asset URLs pass through to CEF unchanged.
+
+**Files modified** (1):
+- `v3/pkg/application/cef_client_stub.go` — `GetRequestHandler()` now
+  returns the singleton `cefRequestHandler` (was nil in Phase 1).
+- `v3/pkg/application/application_linux_cef.go` — `newPlatformApp` calls
+  `setCefAssetsHandler(parent.assets)` so the CEF handler can dispatch
+  to the assetserver.
+
+**Wiring**:
+- `setCefAssetsHandler(http.Handler)` is called from
+  `application_linux_cef.go::newPlatformApp` after the assetserver has
+  been built. The handler is stored in a package-level `cefHandlerAssets`
+  variable behind a mutex; `getCefRequestHandler()` reads it under the
+  same lock.
+
+**Verification**:
+```
+go build ./pkg/application/                          exit 0  (default webgtk)
+go build -tags gtk3 ./pkg/application/              exit 0  (legacy)
+go build -tags server ./pkg/application/            exit 0
+go build -tags cef ./pkg/application/               exit 0  ← NEW (Phase 2)
+cd examples/plain && go build -tags cef -o /tmp/cef-phase2-test .  exit 0 (18MB ELF)
+cd examples/binding && go build -tags cef -o /tmp/binding-cef .    exit 0 (18MB ELF)
+```
+
+**Phase 2 partial status — routing wired, body streaming pending**.
+The pipeline now correctly identifies `wails://` URLs, constructs a
+`webview.Request` adapter, and routes through the assetserver. The
+cef.Response it builds back is currently 501 Not Implemented because
+`cef.Response` lacks `SetBody`. Phase 4 will implement a parallel
+`CefResourceHandler::ReadResponse` callback so the actual bytes can be
+streamed.
+
+**Known Phase 2 limitations**:
+- 501 returned for asset URLs (body not yet streamed).
+- Custom response headers (Cache-Control, Set-Cookie, etc.) dropped —
+  building `cef_string_multimap_t` requires dlopen of CEF API.
+- No scheme registration — we route via OnBeforeResourceLoad, not via
+  `RequestContext::RegisterSchemeHandlerFactory`. Both approaches work;
+  scheme registration is cleaner and will be added in Phase 4.
+
+**Next**: Phase 3 (JS↔Go IPC) — inject `window.wails` shim that routes
+calls through a CefV8Handler → `messageprocessor`. Phase 4 will then
+add the missing body streaming + scheme registration + devtools/dnd/permissions.

@@ -179,6 +179,14 @@ func newPlatformApp(parent *App) *linuxApp {
 		setProgramName(parent.options.Linux.ProgramName)
 	}
 
+	// Wire the assetserver handler into the CEF request pipeline so CEF
+	// browsers can resolve wails:// URLs to embedded assets. This is
+	// called once per app; safe to call multiple times (subsequent calls
+	// just rebind the handler).
+	if parent.assets != nil {
+		setCefAssetsHandler(parent.assets)
+	}
+
 	return app
 }
 

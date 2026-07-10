@@ -6,12 +6,13 @@ import (
 	"github.com/bnema/purego-cef/cef"
 )
 
-// cefClientStub is a Phase 1 stub that satisfies cef.Client with all handlers
-// returning nil. This lets us spin up a CEF browser without yet implementing
-// any of the CefXxxHandler interfaces (those land in Phase 2-4).
+// cefClientStub is the CEF build's implementation of cef.Client. Most
+// handlers return nil (CEF defaults), but GetRequestHandler returns a
+// cefRequestHandler that bridges wails:// and http://wails.localhost/*
+// to the assetserver.
 //
-// All methods receive a stubbed implementation; CEF will see nils from the
-// getters and fall back to default no-op behaviour for each handler.
+// All methods receive a stubbed implementation; CEF will see nils from
+// the getters and fall back to default no-op behaviour for each handler.
 type cefClientStub struct{}
 
 func (c *cefClientStub) GetAudioHandler() cef.AudioHandler               { return nil }
@@ -31,7 +32,13 @@ func (c *cefClientStub) GetLifeSpanHandler() cef.LifeSpanHandler         { retur
 func (c *cefClientStub) GetLoadHandler() cef.LoadHandler                 { return nil }
 func (c *cefClientStub) GetPrintHandler() cef.PrintHandler               { return nil }
 func (c *cefClientStub) GetRenderHandler() cef.RenderHandler             { return nil }
-func (c *cefClientStub) GetRequestHandler() cef.RequestHandler           { return nil }
+
+// GetRequestHandler is the bridge to the assetserver. We always return
+// our handler; per-request decisions are made inside its OnBeforeResourceLoad.
+func (c *cefClientStub) GetRequestHandler() cef.RequestHandler {
+	return getCefRequestHandler()
+}
+
 func (c *cefClientStub) OnProcessMessageReceived(cef.Browser, cef.Frame, cef.ProcessID, cef.ProcessMessage) int32 {
 	return 0
 }
