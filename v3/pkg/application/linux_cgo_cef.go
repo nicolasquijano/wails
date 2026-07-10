@@ -78,16 +78,66 @@ static void cef_connect_activate(GApplication *app) {
 	);
 }
 
-// cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid` (the
-// host window created by CEF for its browser view) as a child of the GTK
-// widget `parent_widget`. This makes the CEF view render inside the GTK
-// container.
+// cef_resize_cef_view resizes the CEF view's X11 window to fill the
+// GtkBox's current allocated size. Called from the size-allocate
+// signal handler. Updates the cached width/height so the handler
+// only fires XResizeWindow when the size actually changes.
+static void cef_resize_cef_view(GtkWidget *widget, Window xid) {
+	if (!GTK_IS_WIDGET(widget) || xid == 0) {
+		return;
+	}
+	GtkNative *native = gtk_widget_get_native(widget);
+	if (!native) {
+		return;
+	}
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (!surface || !GDK_IS_X11_SURFACE(surface)) {
+		return;
+	}
+	GdkDisplay *display = gdk_surface_get_display(surface);
+	Display *xdisplay = gdk_x11_display_get_xdisplay(display);
+
+	int w = gtk_widget_get_width(widget);
+	int h = gtk_widget_get_height(widget);
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	// CEF creates its view at the requested Bounds size; resize it
+	// to match the box's allocated area so the browser fills it.
+	XResizeWindow(xdisplay, xid, (unsigned)w, (unsigned)h);
+	XFlush(xdisplay);
+}
+
+// notify_size_cb is connected to the GtkBox's "notify::width" and
+// "notify::height" property notify signals. It looks up the CEF
+// view XID we stashed in widget data and resizes the CEF view to
+// match. The XID is stored via g_object_set_data with the key
+// "wails-cef-view-xid".
 //
-// GTK4 removed gdk_x11_surface_set_embedder (used in GTK3 to embed foreign
-// X11 windows). For Phase 1 we use a plain XReparentWindow; the foreign
-// window will receive ConfigureNotify and ResizeRedirect events as if it
-// were a managed child. This is enough for static-size windows; Phase 4
-// will add resize tracking via XSelectInput + ConfigureNotify handler.
+// GTK4 dropped the GTK3 "size-allocate" signal, so we use property
+// notify instead. GObject fires the notify signal when a GObject
+// property changes, and GtkWidget exposes width/height as readable
+// properties via gtk_widget_get_width/height.
+static void notify_size_cb(GObject *obj, GParamSpec *pspec, gpointer data) {
+	(void)data;
+	(void)pspec;
+	GtkWidget *widget = GTK_WIDGET(obj);
+	gpointer xid_ptr = g_object_get_data(obj, "wails-cef-view-xid");
+	if (!xid_ptr) {
+		return;
+	}
+	Window xid = (Window)GPOINTER_TO_UINT(xid_ptr);
+	cef_resize_cef_view(widget, xid);
+}
+
+// cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid`
+// (the host window created by CEF for its browser view) as a child of
+// the GTK widget `parent_widget`, then wires a size-allocate handler
+// so the CEF view follows the widget's bounds.
+//
+// GTK4 removed gdk_x11_surface_set_embedder (used in GTK3 to embed
+// foreign X11 windows). We use XReparentWindow + a size-allocate
+// signal handler to keep the CEF view sized to the box.
 static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long cef_window_xid) {
 	GtkWidget *widget = (GtkWidget *)parent_widget;
 	Window xid = (Window)cef_window_xid;
@@ -115,11 +165,26 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 	GdkDisplay *display = gdk_surface_get_display(surface);
 	Display *xdisplay = gdk_x11_display_get_xdisplay(display);
 
-	// XReparentWindow moves the CEF window under our GTK surface's X11 window.
+	// Stash the CEF view XID on the widget so the size-allocate
+	// handler can find it.
+	g_object_set_data(G_OBJECT(widget), "wails-cef-view-xid",
+	                  GUINT_TO_POINTER((guint)xid));
+
+	// Connect property-notify handlers for the widget's width/height.
+	// We do this before XReparentWindow so the first allocation
+	// (which happens shortly after gtk_window_present) resizes the
+	// CEF view to match the actual box bounds — not the 800×600 we
+	// passed in WindowInfo.Bounds.
+	g_signal_connect(widget, "notify::width", G_CALLBACK(notify_size_cb), NULL);
+	g_signal_connect(widget, "notify::height", G_CALLBACK(notify_size_cb), NULL);
+
+	// XReparentWindow moves the CEF window under our GTK surface's
+	// X11 window. Place it at (0,0); the size-allocate handler will
+	// size it correctly.
 	XReparentWindow(xdisplay, xid, parent_xid, 0, 0);
 
-	// Subscribe to ConfigureNotify so we can resize CEF's window when the
-	// GTK widget resizes. (Phase 4 will wire this up properly.)
+	// Subscribe to ConfigureNotify on the CEF window itself in case
+	// the user resizes via CEF DevTools.
 	XSelectInput(xdisplay, xid, StructureNotifyMask);
 
 	// Map the CEF window so it becomes visible.
