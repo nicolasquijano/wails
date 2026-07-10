@@ -4,6 +4,7 @@ package application
 
 import (
 	"fmt"
+	"os"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
@@ -86,6 +87,8 @@ func (w *linuxWebviewWindow) close() {
 // TODO(Phase 2): integrate asset server scheme handler
 // TODO(Phase 3): inject JS shim for wailsIPC
 func (w *linuxWebviewWindow) run() {
+	fmt.Fprintf(os.Stderr, "wails/cef: linuxWebviewWindow.run() starting url=%q\n", w.parent.options.URL)
+
 	app := getNativeApplication()
 
 	// 1. Create host GTK window (GtkApplicationWindow + GtkBox).
@@ -93,6 +96,7 @@ func (w *linuxWebviewWindow) run() {
 		app.application,
 		w.parent.id,
 	)
+	fmt.Fprintf(os.Stderr, "wails/cef: cefCreateHostWindow returned window=%v vbox=%v\n", w.window != nil, w.vbox != nil)
 
 	// 2. Register window in app's window map.
 	app.registerWindow(w.window, w.parent.id)

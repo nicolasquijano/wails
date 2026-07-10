@@ -70,6 +70,8 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 import "C"
 
 import (
+	"fmt"
+	"os"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
@@ -315,5 +317,8 @@ func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser 
 
 	settings := cef.NewBrowserSettings()
 
-	return cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
+	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync url=%q parentXID=%d\n", url, uint64(xid))
+	browser := cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
+	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync returned browser=%v\n", browser != nil)
+	return browser
 }

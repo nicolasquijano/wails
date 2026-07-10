@@ -232,6 +232,11 @@ func newPlatformApp(parent *App) *linuxApp {
 	// render process started.
 	registerCEFExtension()
 
+	// Register the "wails" custom scheme so CEF recognises wails://
+	// URLs as valid (otherwise the browser shows a blank page because
+	// the URL parser rejects the unknown scheme before any request fires).
+	registerWailsScheme()
+
 	return app
 }
 
