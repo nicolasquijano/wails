@@ -1,4 +1,4 @@
-//go:build linux && !android && !gtk3 && !server
+//go:build linux && !android && !gtk3 && !cef && !server
 
 package application
 

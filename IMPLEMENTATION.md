@@ -614,7 +614,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 
 | Phase | Name | Status | LOC est. | Files |
 |---|---|---|---|---|
-| 0 | Build tag scaffolding | 📋 PENDING | ~30 diffs | 10 modified |
+| 0 | Build tag scaffolding | ✅ COMPLETE (2026-07-09) | ~15 diffs | 14 modified |
 | 1 | Stub energye+CEF, hello world | 📋 PENDING | ~600 | 4 new |
 | 2 | Asset server bridge | 📋 PENDING | ~500 | 3 new |
 | 3 | IPC JS↔Go via CefV8Handler | 📋 PENDING | ~400 | 2 new |
@@ -630,10 +630,10 @@ See `history/PLAN.md` §3 for the full file-by-file plan.
 
 | Tag set | Backend | Status |
 |---|---|---|
-| (none) | WebKitGTK 6.0 + GTK4 | ✅ Untouched |
-| `-tags gtk3` | WebKit2GTK 4.1 + GTK3 (legacy) | ✅ Untouched |
-| `-tags server` | Headless HTTP | ✅ Untouched |
-| `-tags cef` | CEF 109 + GTK4 host | 🚧 In progress |
+| (none) | WebKitGTK 6.0 + GTK4 | ✅ Verified compiles identical to upstream |
+| `-tags gtk3` | WebKit2GTK 4.1 + GTK3 (legacy) | ✅ Verified compiles identical to upstream |
+| `-tags server` | Headless HTTP | ✅ Verified compiles identical to upstream |
+| `-tags cef` | CEF 109 + GTK4 host | 🚧 Phase 0 done; fails as expected (needs `linuxApp`, `linuxWebviewWindow`, `fatalHandler` stubs in Phase 1) |
 
 ### Session log
 
@@ -646,3 +646,37 @@ See `history/PLAN.md` §3 for the full file-by-file plan.
 - Strategy: use energye as **library** (import `energye/cef` for bindings), NOT as framework (avoid `energye/v3/application` which would replace Wails)
 - Added §0 to `history/PLAN.md` with full ecosystem comparison table
 - Inventoried all `*_linux*.go` files: 10 require build-tag modification to add `!cef`
+
+#### 2026-07-09 (Session C.0b — Phase 0)
+- Added `!cef` to 14 build tags across `v3/pkg/application/` and `v3/internal/assetserver/webview/`:
+
+  **pkg/application (10)**:
+  - `application_linux.go` (webgtk default)
+  - `application_linux_gtk3.go` (legacy)
+  - `linux_cgo.go`, `linux_cgo.c`, `linux_cgo_gtk3.go`
+  - `gtkdispatch_linux.go`, `gtkdispatch_linux_gtk3.go`
+  - `menu_linux.go`, `menu_linux_gtk3.go`
+  - `menuitem_linux.go`, `menuitem_linux_gtk3.go`
+  - `application_linux_dbus.go`
+  - `global_shortcut_linux.go`, `global_shortcut_linux_portal.go`
+  - `global_shortcut_linux_x11.go`, `global_shortcut_linux_x11_test.go`
+  - `permissions_linux.go`
+
+  **internal/assetserver/webview (3)**:
+  - `request_linux.go`, `request_linux_gtk3.go`
+  - `responsewriter_linux.go`, `responsewriter_linux_gtk3.go`
+  - `webkit_linux.go`, `webkit_linux_gtk3.go`
+
+- `webview_window_linux.go` left with `linux && !cef && !android && !server` (no `!gtk3`) so it serves **both default AND gtk3** (the shared `linuxWebviewWindow` type).
+
+- Verified all 4 build modes:
+  - `go build ./pkg/application/` → **exit 0** (default webgtk, no changes)
+  - `go build -tags gtk3 ./pkg/application/` → **exit 0** (legacy, no changes)
+  - `go build -tags server ./pkg/application/` → **exit 0** (no changes)
+  - `go build -tags cef ./pkg/application/` → **exit 1** with expected errors:
+    - `undefined: linuxApp`
+    - `undefined: linuxWebviewWindow`
+    - `undefined: fatalHandler`
+  - Asset server: same verification, default + gtk3 both compile clean.
+
+- **Phase 0 ✅ COMPLETE**. The build tag scaffolding is in place; webgtk/gtk3/server paths compile identically to upstream. CEF path now requires Phase 1 stubs (`application_linux_cef.go`, `webview_window_linux_cef.go`, `linux_cgo_cef.go`).
