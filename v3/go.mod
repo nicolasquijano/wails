@@ -1,6 +1,6 @@
 module github.com/wailsapp/wails/v3
 
-go 1.25.0
+go 1.26
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3
@@ -41,6 +41,7 @@ require (
 require (
 	al.essio.dev/pkg/shellescape v1.6.0 // indirect
 	atomicgo.dev/schedule v0.1.0 // indirect
+	github.com/bnema/purego-cef v0.13.3 // indirect
 	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.14 // indirect

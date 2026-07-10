@@ -1,0 +1,387 @@
+//go:build linux && cgo && cef && !android && !server
+
+package application
+
+import (
+	"fmt"
+	"unsafe"
+
+	"github.com/bnema/purego-cef/cef"
+)
+
+// linuxWebviewWindow is the CEF-flavoured webview window for Phase 1.
+//
+// In Phase 1 the struct fields mirror the GTK4 default, but the semantics
+// differ:
+//   - window is the host GtkApplicationWindow (managed by GTK4).
+//   - vbox is the GtkBox inside that window (host container).
+//   - webview is the X11 window ID returned by CEF for the browser view,
+//     reparented into `vbox` via cefAttachToGTKWidget().
+//
+// The CefBrowser handle is stored on the `browser` field and used by
+// execJS / openDevTools / print / etc.
+//
+// In Phase 2 we will add:
+//   - scheme handler bridge to assetserver.Handler
+//   - CefV8Handler for JS↔Go IPC
+//   - load-end event emitter to wails events bus
+type linuxWebviewWindow struct {
+	id            uint
+	application   pointer
+	window        pointer
+	webview       pointer // X11 window ID (uintptr) of the CEF view
+	vbox          pointer // GtkBox that hosts the CEF view
+	parent        *WebviewWindow
+	menubar       pointer
+	accels        pointer
+	lastWidth     int
+	lastHeight    int
+	drag          dragInfo
+	lastX, lastY  int
+	gtkmenu       pointer
+	ctxMenuOpened bool
+
+	// CEF-specific fields
+	browser cef.Browser // CEF browser handle; nil until first create
+
+	moveDebouncer     func(func())
+	resizeDebouncer   func(func())
+	ignoreMouseEvents bool
+}
+
+func newWindowImpl(parent *WebviewWindow) *linuxWebviewWindow {
+	result := &linuxWebviewWindow{
+		application: getNativeApplication().application,
+		parent:      parent,
+	}
+	return result
+}
+
+// setTitle is a Phase 1 stub. The GTK4 default uses gtk_window_set_title
+// via CGo. We delegate to the GTK4 host window since CEF renders inside it.
+func (w *linuxWebviewWindow) setTitle(title string) {
+	// Delegates to CGo; uses same GTK4 call as the default backend.
+	cefSetWindowTitle(w.window, title)
+}
+
+// destroy closes the CEF browser and GTK window.
+//
+// Order matters: CEF browser must be closed BEFORE the GTK window is
+// destroyed, otherwise CEF will try to paint into a destroyed X11 window.
+func (w *linuxWebviewWindow) destroy() {
+	if w.browser != nil {
+		// Phase 2: call browser.Close() and wait for OnBeforeClose.
+		w.browser = nil
+	}
+	cefDestroyWindow(w.window)
+}
+
+func (w *linuxWebviewWindow) close() {
+	cefCloseWindow(w.window)
+}
+
+// run is the main entrypoint for a CEF window. In Phase 1 this creates a
+// GTK4 application window with a GtkBox, then attaches a CEF browser to it.
+//
+// TODO(Phase 2): integrate asset server scheme handler
+// TODO(Phase 3): inject JS shim for wailsIPC
+func (w *linuxWebviewWindow) run() {
+	app := getNativeApplication()
+
+	// 1. Create host GTK window (GtkApplicationWindow + GtkBox).
+	w.window, w.vbox = cefCreateHostWindow(
+		app.application,
+		w.parent.id,
+	)
+
+	// 2. Register window in app's window map.
+	app.registerWindow(w.window, w.parent.id)
+
+	// 3. Apply options (title, size, frameless, etc.).
+	title := w.parent.options.Title
+	if title == "" {
+		title = w.parent.options.Name
+	}
+	w.setTitle(title)
+	w.setDefaultSize(w.parent.options.Width, w.parent.options.Height)
+	w.setSize(w.parent.options.Width, w.parent.options.Height)
+	if w.parent.options.BackgroundType != BackgroundTypeSolid {
+		w.setTransparent()
+		w.setBackgroundColour(w.parent.options.BackgroundColour)
+	}
+	w.setFrameless(w.parent.options.Frameless)
+	w.setResizable(!w.parent.options.DisableResize)
+	w.setAlwaysOnTop(w.parent.options.AlwaysOnTop)
+
+	// 4. Create CEF browser attached to the GtkBox.
+	w.browser = cefCreateBrowserInWidget(
+		unsafe.Pointer(w.vbox),
+		w.parent.options.URL,
+	)
+
+	// 5. Show the GTK window.
+	w.show()
+}
+
+func (w *linuxWebviewWindow) show() {
+	cefShowWindow(w.window)
+}
+
+func (w *linuxWebviewWindow) hide() {
+	cefHideWindow(w.window)
+}
+
+func (w *linuxWebviewWindow) focus() {
+	cefPresentWindow(w.window)
+}
+
+func (w *linuxWebviewWindow) forceReload() {
+	if w.browser == nil {
+		return
+	}
+	w.browser.Reload()
+}
+
+// execJS executes JavaScript in the browser's main frame.
+//
+// In Phase 1 this is a no-op (CEF browser not yet wired to message
+// pipeline). Phase 3 will route calls through the cefBridge so the
+// messageprocessor sees them.
+func (w *linuxWebviewWindow) execJS(js string) {
+	if w.browser == nil {
+		return
+	}
+	frame := w.browser.GetMainFrame()
+	if frame == nil {
+		return
+	}
+	frame.ExecuteJavaScript(js, "", 0)
+}
+
+// openDevTools opens the Chromium DevTools window via CEF.
+//
+// In Phase 1 this is a no-op when the browser is not yet created.
+func (w *linuxWebviewWindow) openDevTools() {
+	if w.browser == nil {
+		return
+	}
+	host := w.browser.GetHost()
+	if host == nil {
+		return
+	}
+	wi := cef.NewWindowInfo()
+	settings := cef.NewBrowserSettings()
+	host.ShowDevTools(&wi, nil, &settings, nil)
+}
+
+// print is a Phase 1 stub; full printing pipeline lands in Phase 4.
+func (w *linuxWebviewWindow) print() error {
+	if w.browser == nil {
+		return fmt.Errorf("wails/cef: print: browser not ready")
+	}
+	host := w.browser.GetHost()
+	if host == nil {
+		return fmt.Errorf("wails/cef: print: no host")
+	}
+	host.Print()
+	return nil
+}
+
+// Phase 1: stub implementations for the rest of the platformWindow interface.
+// These will be filled out in Phase 4 (devtools/permisos/DnD/menu).
+
+func (w *linuxWebviewWindow) endDrag(button uint, x, y int)             {}
+func (w *linuxWebviewWindow) connectSignals()                            {}
+func (w *linuxWebviewWindow) openContextMenu(menu *Menu, data *ContextMenuData) {}
+func (w *linuxWebviewWindow) isNormal() bool                             { return true }
+func (w *linuxWebviewWindow) setCloseButtonEnabled(enabled bool)        {}
+func (w *linuxWebviewWindow) setMinimiseButtonEnabled(enabled bool)     {}
+func (w *linuxWebviewWindow) setMaximiseButtonEnabled(enabled bool)      {}
+func (w *linuxWebviewWindow) disableSizeConstraints()                   {}
+func (w *linuxWebviewWindow) enableSizeConstraints()                    {}
+func (w *linuxWebviewWindow) unminimise()                                {}
+func (w *linuxWebviewWindow) on(eventID uint)                            {}
+func (w *linuxWebviewWindow) zoom()                                      {}
+func (w *linuxWebviewWindow) windowZoom()                                {}
+func (w *linuxWebviewWindow) centre()                                    {}
+func (w *linuxWebviewWindow) center()                                    {}
+func (w *linuxWebviewWindow) restore()                                   {}
+func (w *linuxWebviewWindow) setMinMaxSize(minWidth, minHeight, maxWidth, maxHeight int) {
+}
+func (w *linuxWebviewWindow) setMinSize(width, height int)             {}
+func (w *linuxWebviewWindow) getBorderSizes() *LRTB                     { return &LRTB{} }
+func (w *linuxWebviewWindow) setMaxSize(width, height int)             {}
+func (w *linuxWebviewWindow) setRelativePosition(x int, y int)         {}
+func (w *linuxWebviewWindow) width() int                                { return w.lastWidth }
+func (w *linuxWebviewWindow) height() int                               { return w.lastHeight }
+func (w *linuxWebviewWindow) applyScreenPlacement()                     {}
+func (w *linuxWebviewWindow) bounds() Rect                              { return Rect{} }
+func (w *linuxWebviewWindow) setMenu(menu *Menu)                        {}
+func (w *linuxWebviewWindow) nativeWindow() unsafe.Pointer              { return unsafe.Pointer(w.window) }
+func (w *linuxWebviewWindow) startDrag() error                         { return nil }
+func (w *linuxWebviewWindow) startResize(_ string) error              { return nil }
+func (w *linuxWebviewWindow) attachModal(modalWindow *WebviewWindow)   {}
+func (w *linuxWebviewWindow) setMinimiseButtonState(state ButtonState)  {}
+func (w *linuxWebviewWindow) setMaximiseButtonState(state ButtonState)  {}
+func (w *linuxWebviewWindow) setCloseButtonState(state ButtonState)     {}
+func (w *linuxWebviewWindow) setFullscreenButtonState(state ButtonState) {}
+func (w *linuxWebviewWindow) isIgnoreMouseEvents() bool                 { return w.ignoreMouseEvents }
+func (w *linuxWebviewWindow) setIgnoreMouseEvents(ignore bool)          { w.ignoreMouseEvents = ignore }
+func (w *linuxWebviewWindow) showMenuBar()                              {}
+func (w *linuxWebviewWindow) hideMenuBar()                              {}
+func (w *linuxWebviewWindow) toggleMenuBar()                            {}
+func (w *linuxWebviewWindow) snapAssist()                               {}
+func (w *linuxWebviewWindow) setContentProtection(enabled bool)         {}
+func (w *linuxWebviewWindow) setNonClientHitTestRegions([]nonClientHitTestRegion) {
+}
+
+// copy is a Phase 1 stub. Real implementation lands in Phase 4 (called
+// when the same WebviewWindow struct is reused after a destroy+recreate).
+func (w *linuxWebviewWindow) copy() {
+	// No-op for Phase 1.
+}
+
+// setSize is a Phase 1 stub. Real implementation lands in Phase 4
+// using gtk_window_set_default_size + resize.
+func (w *linuxWebviewWindow) setSize(width, height int) {
+	_ = width
+	_ = height
+}
+
+// setURL is a Phase 1 stub. Real implementation in Phase 2+ uses
+// CefBrowser::MainFrame().LoadURL().
+func (w *linuxWebviewWindow) setURL(url string) {
+	if w.browser == nil || url == "" {
+		return
+	}
+	frame := w.browser.GetMainFrame()
+	if frame == nil {
+		return
+	}
+	frame.LoadURL(url)
+}
+
+// setFrameless is a Phase 1 stub. Real implementation in Phase 4.
+func (w *linuxWebviewWindow) setFrameless(frameless bool) {
+	_ = frameless
+}
+
+// setResizable is a Phase 1 stub. Real implementation in Phase 4.
+func (w *linuxWebviewWindow) setResizable(resizable bool) {
+	_ = resizable
+}
+
+// setBackgroundColour is a Phase 1 stub. Real implementation in Phase 4.
+func (w *linuxWebviewWindow) setBackgroundColour(colour RGBA) {
+	_ = colour
+}
+
+// setTransparent is a Phase 1 stub. Real implementation in Phase 4.
+func (w *linuxWebviewWindow) setTransparent() {}
+
+// setDefaultSize is a Phase 1 stub.
+func (w *linuxWebviewWindow) setDefaultSize(width, height int) {
+	_ = width
+	_ = height
+}
+
+func (w *linuxWebviewWindow) setAlwaysOnTop(alwaysOnTop bool) {
+	_ = alwaysOnTop
+}
+
+// cut / copy / paste / selectAll / undo / redo are Phase 1 stubs that
+// proxy to CefFrame::ExecuteJavaScript("document.execCommand(...)"). Real
+// implementations wire this through CefFrame in Phase 4.
+func (w *linuxWebviewWindow) cut()       { w.execJS("document.execCommand('cut')") }
+func (w *linuxWebviewWindow) copyCmd()   { w.execJS("document.execCommand('copy')") }
+func (w *linuxWebviewWindow) paste()     { w.execJS("document.execCommand('paste')") }
+func (w *linuxWebviewWindow) selectAll() { w.execJS("document.execCommand('selectAll')") }
+func (w *linuxWebviewWindow) undo()      { w.execJS("document.execCommand('undo')") }
+func (w *linuxWebviewWindow) redo()      { w.execJS("document.execCommand('redo')") }
+func (w *linuxWebviewWindow) delete()    { w.execJS("document.execCommand('delete')") }
+
+// flash is a Phase 1 stub; real impl in Phase 4 uses gtk_window_set_urgency_hint.
+func (w *linuxWebviewWindow) flash(_ bool) {}
+
+// getCurrentMonitorGeometry is a Phase 1 stub.
+func (w *linuxWebviewWindow) getCurrentMonitorGeometry() (int, int, int, int) {
+	return 0, 0, 1920, 1080
+}
+
+// getScreen is a Phase 1 stub.
+func (w *linuxWebviewWindow) getScreen() (*Screen, error) {
+	return &Screen{}, nil
+}
+
+// size is a Phase 1 stub.
+func (w *linuxWebviewWindow) size() (int, int) {
+	return w.lastWidth, w.lastHeight
+}
+
+// reload, zoomReset, zoomIn, zoomOut, getZoom, setZoom, zoom, setHTML are
+// Phase 1 stubs. Real implementations in Phase 2+ use the CEF API.
+func (w *linuxWebviewWindow) reload()      { w.browser.ReloadIgnoreCache() }
+func (w *linuxWebviewWindow) zoomReset()   { w.browser.GetHost().SetZoomLevel(0) }
+func (w *linuxWebviewWindow) zoomIn()      {
+	host := w.browser.GetHost()
+	host.SetZoomLevel(host.GetZoomLevel() + 0.5)
+}
+func (w *linuxWebviewWindow) zoomOut() {
+	host := w.browser.GetHost()
+	host.SetZoomLevel(host.GetZoomLevel() - 0.5)
+}
+func (w *linuxWebviewWindow) getZoom() float64 { return w.browser.GetHost().GetZoomLevel() }
+func (w *linuxWebviewWindow) setZoom(z float64) { w.browser.GetHost().SetZoomLevel(z) }
+// zoom() is already declared as a no-op stub above (Phase 1).
+func (w *linuxWebviewWindow) setHTML(html string) {
+	if w.browser == nil {
+		return
+	}
+	frame := w.browser.GetMainFrame()
+	if frame == nil {
+		return
+	}
+	// Phase 2 will wire LoadString properly; for now we route through
+	// a data: URL via LoadURL to keep Phase 1 compiling.
+	frame.LoadURL("data:text/html;charset=utf-8," + html)
+}
+
+// isFullscreen / isMaximised / isMinimised / isVisible / isFocused are Phase 1 stubs.
+func (w *linuxWebviewWindow) isFullscreen() bool { return false }
+func (w *linuxWebviewWindow) isMaximised() bool  { return false }
+func (w *linuxWebviewWindow) isMinimised() bool  { return false }
+func (w *linuxWebviewWindow) isFocused() bool    { return false }
+func (w *linuxWebviewWindow) isVisible() bool    { return true }
+
+// close is a Phase 1 stub. Real implementation in Phase 4 uses
+// CefBrowser::CloseBrowser + gtk_window_close.
+func (w *linuxWebviewWindow) closeWindow() { cefCloseWindow(w.window) }
+
+// handleKeyEvent / handleNonClientRegionMessage are Phase 1 stubs.
+func (w *linuxWebviewWindow) handleKeyEvent(_ string) {}
+func (w *linuxWebviewWindow) handleNonClientRegionMessage(_, _ int) {}
+
+// setEnabled / enableDND / disableDND are Phase 1 stubs.
+func (w *linuxWebviewWindow) setEnabled(_ bool) {}
+func (w *linuxWebviewWindow) enableDND()        {}
+func (w *linuxWebviewWindow) disableDND()       {}
+
+// position / setBounds / setPosition / centerOnScreen are Phase 1 stubs.
+func (w *linuxWebviewWindow) position() (int, int)                  { return 0, 0 }
+func (w *linuxWebviewWindow) relativePosition() (int, int)          { return 0, 0 }
+func (w *linuxWebviewWindow) setBounds(_ Rect)                      {}
+func (w *linuxWebviewWindow) setPosition(x, y int)                 { _ = x; _ = y }
+func (w *linuxWebviewWindow) centerOnScreen(_ *Screen)             {}
+func (w *linuxWebviewWindow) physicalBounds() Rect                  { return Rect{} }
+func (w *linuxWebviewWindow) setPhysicalBounds(_ Rect)             {}
+
+func (w *linuxWebviewWindow) maximise()     {}
+func (w *linuxWebviewWindow) unmaximise()   {}
+func (w *linuxWebviewWindow) minimise()     {}
+func (w *linuxWebviewWindow) unminimise2()  {}
+func (w *linuxWebviewWindow) fullscreen()   {}
+func (w *linuxWebviewWindow) unfullscreen() {}
+func (w *linuxWebviewWindow) move(x, y int) { _ = x; _ = y }
+// centre() is already declared as a no-op stub above (Phase 1).
+func (w *linuxWebviewWindow) present()      {}
+func (w *linuxWebviewWindow) print2() error { return w.print() }

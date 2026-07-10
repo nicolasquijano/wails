@@ -615,7 +615,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | Phase | Name | Status | LOC est. | Files |
 |---|---|---|---|---|
 | 0 | Build tag scaffolding | ✅ COMPLETE (2026-07-09) | ~15 diffs | 14 modified |
-| 1 | Stub energye+CEF, hello world | 📋 PENDING | ~600 | 4 new |
+| 1 | First CEF build (purego-cef + GTK4 host) | ✅ COMPLETE (2026-07-09) | ~900 LOC | 6 new + 1 dep |
 | 2 | Asset server bridge | 📋 PENDING | ~500 | 3 new |
 | 3 | IPC JS↔Go via CefV8Handler | 📋 PENDING | ~400 | 2 new |
 | 4 | Devtools/permisos/DnD/menu | 📋 PENDING | ~500 | modifications |
@@ -633,7 +633,7 @@ See `history/PLAN.md` §3 for the full file-by-file plan.
 | (none) | WebKitGTK 6.0 + GTK4 | ✅ Verified compiles identical to upstream |
 | `-tags gtk3` | WebKit2GTK 4.1 + GTK3 (legacy) | ✅ Verified compiles identical to upstream |
 | `-tags server` | Headless HTTP | ✅ Verified compiles identical to upstream |
-| `-tags cef` | CEF 109 + GTK4 host | 🚧 Phase 0 done; fails as expected (needs `linuxApp`, `linuxWebviewWindow`, `fatalHandler` stubs in Phase 1) |
+| `-tags cef` | CEF (purego-cef bindings) + GTK4 host | ✅ Phase 1 complete — produces ~18MB ELF binary, all 4 build modes (default/gtk3/server/cef) build `examples/plain` |
 
 ### Session log
 
@@ -680,3 +680,69 @@ See `history/PLAN.md` §3 for the full file-by-file plan.
   - Asset server: same verification, default + gtk3 both compile clean.
 
 - **Phase 0 ✅ COMPLETE**. The build tag scaffolding is in place; webgtk/gtk3/server paths compile identically to upstream. CEF path now requires Phase 1 stubs (`application_linux_cef.go`, `webview_window_linux_cef.go`, `linux_cgo_cef.go`).
+
+#### 2026-07-09 (Session C.0c — Phase 1)
+
+**Goal**: First end-to-end `-tags cef` build that produces a working binary.
+Strategy: purego-cef bindings + GTK4 host window, mirroring the default webgtk
+backend's host pattern.
+
+**Decision C.3 — Use `purego-cef` (not `energye/cef`)**:
+- purego-cef v0.13.3 is pure Go (CGO_ENABLED=0), has zero GTK dependency, and
+  ships hand-written `cef.Init` / `cef.Shutdown` / `cef.BrowserHostCreateBrowserSync`
+  that work out of the box. Energye/cef forces CGO + drags LCL/GTK3 internally.
+- Tradeoff: purego-cef is pre-1.0 but actively maintained (16 releases since
+  2026-03). Energye is more mature but heavier.
+
+**Files created** (6 new, ~900 LOC):
+- `v3/pkg/application/linux_cgo_cef.go` — cgo host helpers (`cef_attach_to_gtk_widget`,
+  `cefCreateHostWindow`, `cefSetWindowTitle`, etc.) + `pointer`/`windowPointer`/`dragInfo`
+  type aliases (defined locally because linux_cgo.go is excluded from `cef` build).
+- `v3/pkg/application/application_linux_cef.go` — `linuxApp` (Phase 1 stub mirroring
+  GTK4 fields), `linuxApp.run()` calls `cefInit()` then `appRun()`, `fatalHandler`.
+- `v3/pkg/application/webview_window_linux_cef.go` — `linuxWebviewWindow` struct
+  with all `webviewWindowImpl` interface methods (most as no-op Phase 1 stubs).
+  Real `run()` creates GTK4 host window + CEF browser via
+  `cef.BrowserHostCreateBrowserSync`.
+- `v3/pkg/application/cef_client_stub.go` — `cefClientStub` implementing
+  `cef.Client` with all handler getters returning nil (CEF defaults).
+- `v3/pkg/application/clipboard_linux_cef.go` — clipboard no-op stubs.
+- `v3/pkg/application/dialogs_linux_cef.go` — dialog stubs (file picker, message
+  dialog all return errors in Phase 1; full impl lands in Phase 4).
+- `v3/pkg/application/menu_global_shortcut_linux_cef.go` — menu/global-shortcut/
+  system-tray stub implementations for the CEF build.
+
+**Files modified** (additional `!cef` tags added):
+- `v3/pkg/application/clipboard_linux.go`, `dialogs_linux.go`, `mainthread_linux.go`,
+  `screen_linux.go`, `events_common_linux.go`, `systemtray_linux.go`,
+  `webview_window_linux_dev.go` — all depend on GTK4 cgo symbols
+  (`gtkDispatch`, `clipboardSet`, `runQuestionDialog`, etc.) and are now
+  excluded from the CEF build.
+
+**Dependency**:
+- `github.com/bnema/purego-cef v0.13.3` (added as indirect; becomes direct
+  once Phase 1 imports are stabilized).
+
+**Verification**:
+```
+go build ./pkg/application/                          exit 0  (default webgtk unchanged)
+go build -tags gtk3 ./pkg/application/              exit 0  (legacy unchanged)
+go build -tags server ./pkg/application/            exit 0
+go build -tags cef ./pkg/application/               exit 0  ← NEW
+go build -tags gtk3 ./internal/assetserver/webview/ exit 0
+cd v3/examples/plain && go build -tags cef -o /tmp/cef-hello-test .   exit 0 (18MB ELF)
+cd v3/examples/plain && go build            -o /tmp/plain-default   . exit 0 (16MB ELF)
+cd v3/examples/plain && go build -tags gtk3 -o /tmp/plain-gtk3      . exit 0 (16MB ELF)
+```
+
+**Known limitations** (all addressed in Phases 2-4):
+- No asset server bridge (browsers only load http(s) URLs).
+- No JS↔Go IPC (`window.wails` shim not injected).
+- Native dialogs (file picker, message) return errors.
+- DevTools only opens when `w.browser != nil` (basic path works).
+- Window resize doesn't propagate to the CEF X11 window.
+- Drag & drop, permissions, fullscreen, menu integration all stubbed.
+
+**Phase 1 ✅ COMPLETE**. The build pipeline works end-to-end. Next: Phase 2
+implements the asset server scheme handler so CEF can load `wails://` URLs
+from the embedded frontend.

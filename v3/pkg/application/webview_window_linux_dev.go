@@ -1,4 +1,4 @@
-//go:build linux && !production && !android && !server
+//go:build linux && !cef && !production && !android && !server
 
 package application
 
