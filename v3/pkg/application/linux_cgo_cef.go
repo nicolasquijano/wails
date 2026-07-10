@@ -407,8 +407,8 @@ func cefDestroyWindow(window pointer) {
 }
 
 // cefCreateBrowserInWidget creates a CEF browser, then reparents its
-// X11 view inside the supplied GtkBox so the browser fills the box's
-// content area.
+// X11 view into the GtkBox so the browser fills the box's content
+// area.
 //
 // We DON'T pass WindowInfo.ParentWindow to CEF. The reason is a
 // MatchError that Chromium raises when it tries to create a child X11
@@ -419,11 +419,12 @@ func cefDestroyWindow(window pointer) {
 // compositor via _NET_VISIBLE. The two don't share a visual, so
 // XCreateWindow fails with "Match" and the browser never paints.
 //
-// The fix is to let CEF create a top-level X11 window (no
-// ParentWindow), then XReparentWindow it into the GtkBox ourselves.
-// After reparenting, the CEF view fills the box's content area and
-// gets resized automatically via the existing
-// XSelectInput+StructureNotifyMask wiring in cef_attach_to_gtk_widget.
+// Instead we let CEF create a top-level X11 window (no ParentWindow),
+// then XReparentWindow it into the GtkBox ourselves. The
+// cef_attach_to_gtk_widget helper walks widget → GtkNative →
+// GdkSurface → XID, so it correctly identifies the GtkWindow as the
+// X11 parent of the CEF view even when we hand it a GtkBox (which
+// has no native surface of its own).
 func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string) cef.Browser {
 	if gtkWindow == nil {
 		debugLog("[cefCreateBrowserInWidget] gtkWindow is nil")
@@ -460,16 +461,9 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 		return nil
 	}
 
-	// Same for the GtkBox — we need its X11 handle to XReparentWindow
-	// CEF's view into it. The GtkBox itself has no native surface, so
-	// it has no XID of its own; we reparent into the GtkWindow
-	// instead, which gets the browser visible immediately. Resize
-	// handling will need to be wired in a later phase.
-	_ = gtkBox
-
 	wi := cef.NewWindowInfo()
 	// No ParentWindow: let CEF create a top-level X11 window. We
-	// reparent it into the GtkWindow below.
+	// reparent it into the GtkBox below.
 	wi.WindowlessRenderingEnabled = 0
 	wi.SharedTextureEnabled = 0
 	wi.ExternalBeginFrameEnabled = 0
@@ -485,24 +479,32 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 
 	settings := cef.NewBrowserSettings()
 
-	debugLog("[cefCreateBrowserInWidget] url=%q parentXID=%d (no CEF parent, reparent follows)", url, uint64(parentXID))
+	debugLog("[cefCreateBrowserInWidget] url=%q gtkWindowXID=%d", url, uint64(parentXID))
 	browser := cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
 	debugLog("[cefCreateBrowserInWidget] returned browser=%v", browser != nil)
 	if browser == nil {
 		return nil
 	}
 
-	// Reparent CEF's view window into the GTK window. We pass
-	// gtkWindow (the top-level) because GtkBox has no native X11
-	// surface. Later phases can add a per-frame resize handler so
-	// the CEF view fills the box's content area.
+	// Reparent CEF's view window into the GtkBox. cef_attach_to_gtk_widget
+	// walks widget -> GtkNative -> surface -> XID, so even when given a
+	// GtkBox (no native surface) it correctly resolves the parent XID to
+	// the enclosing GtkWindow.
 	host := browser.GetHost()
-	if host != nil {
-		view := host.GetWindowHandle()
-		debugLog("[cefCreateBrowserInWidget] browser view XID=%d", uint64(view))
-		if view != 0 {
-			cefAttachToGTKWidget(unsafe.Pointer(gtkWindow), view)
-		}
+	if host == nil {
+		return browser
 	}
+	view := host.GetWindowHandle()
+	debugLog("[cefCreateBrowserInWidget] browser view XID=%d", uint64(view))
+	if view == 0 {
+		return browser
+	}
+	target := gtkBox
+	if target == nil {
+		// Fallback to the GtkWindow if no box was supplied (e.g. the
+		// call site hasn't laid out a vbox yet).
+		target = unsafe.Pointer(gtkWindow)
+	}
+	cefAttachToGTKWidget(target, view)
 	return browser
 }
