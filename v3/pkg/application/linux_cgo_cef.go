@@ -262,12 +262,20 @@ func cefDestroyWindow(window pointer) {
 }
 
 // cefCreateBrowserInWidget creates a CEF browser and attaches its view to
-// the given GTK widget.
+// the given GTK widget via X11 window reparenting.
 //
-// Implementation note: this is a Phase 1 placeholder that creates the CEF
-// browser but does NOT yet wire up the asset server scheme handler (Phase 2)
-// nor the JS↔Go IPC shim (Phase 3). For Phase 1, browsers load URLs via
-// http(s) directly.
+// We use CEF's "child window" mode (ParentWindow set to the GTK widget's
+// X11 handle) so CEF creates a child X11 window inside our GTK widget
+// and draws into it directly. This is the same approach used by the
+// reference CEF GTK sample.
+//
+// Implementation note: Phase 4.2 fixes the Phase 1 SetAsWindowless stub
+// which produced an invisible browser. The new path uses:
+//   1. gtk_widget_get_native → gtk_native_get_surface →
+//      gdk_x11_surface_get_xid to read the widget's X11 handle.
+//   2. Set ParentWindow on the WindowInfo to the widget XID.
+//   3. BrowserHostCreateBrowserSync creates a child X11 window under
+//      the widget, visible as soon as XMapWindow runs.
 func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser {
 	if gtkWidget == nil {
 		return nil
@@ -276,18 +284,34 @@ func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser 
 		url = "about:blank"
 	}
 
-	// Phase 2 TODO: implement a CefClient with a CefResourceRequestHandler
-	// that bridges wails:// and http://wails.localhost to the asset server.
-	// Phase 1 uses a stub client whose handlers are all nil (CEF defaults).
 	stub := &cefClientStub{}
 	rawClient := cef.NewClient(stub)
 
+	// Step 1: realize the widget so it has a GdkSurface.
+	C.gtk_widget_realize((*C.GtkWidget)(gtkWidget))
+
+	// Step 2: walk widget -> GtkNative -> GdkSurface.
+	native := C.gtk_widget_get_native((*C.GtkWidget)(gtkWidget))
+	if native == nil {
+		return nil
+	}
+	surface := C.gtk_native_get_surface(native)
+	if surface == nil {
+		return nil
+	}
+	xid := C.gdk_x11_surface_get_xid(surface)
+	if xid == 0 {
+		return nil
+	}
+
 	wi := cef.NewWindowInfo()
-	// Tell CEF to render into our existing X11 window. The host widget's
-	// XID will be discovered later when CEF calls back with the new window.
-	// For Phase 1 we use SetAsWindowless; the GTK integration reparent logic
-	// above is wired up separately.
-	cef.SetAsWindowless(&wi, 0, false)
+	// Tell CEF to create a child X11 window inside our GTK widget.
+	// ParentWindow = the host widget's XID. CEF picks the child
+	// Window XID itself. CEFWindowHandleT is uint64 on Linux.
+	wi.ParentWindow = uint64(xid)
+	wi.WindowlessRenderingEnabled = 0
+	wi.SharedTextureEnabled = 0
+	wi.ExternalBeginFrameEnabled = 0
 
 	settings := cef.NewBrowserSettings()
 
