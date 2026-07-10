@@ -70,7 +70,13 @@ func main() {
 		Title: "Wails + CEF",
 		Width: 800,
 		Height: 600,
-		URL:   "/",
+		// wails://localhost/ routes through the CEF asset server
+		// bridge (see pkg/application/cef_request_handler.go) and is
+		// served by the inline HandlerFunc above. A plain "/" would
+		// resolve to http://localhost/ which is NOT intercepted by
+		// our request handler (it only matches wails:// and
+		// http(s)://wails.localhost/).
+		URL: "wails://localhost/",
 	})
 
 	if err := app.Run(); err != nil {
