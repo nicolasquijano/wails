@@ -39,6 +39,14 @@ func (p *Pacman) Packages() Packagemap {
 			{Name: "webkit2gtk-4.1", SystemPackage: true, Library: true, Optional: true},
 			{Name: "webkit2gtk", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// The CEF opt-in backend (-tags cef). Binary tarballs at
+			// https://cef-builds.spotifycdn.com; Arch users can grab a
+			// prebuilt package from AUR (e.g. jellyfin-desktop-libcef-bin).
+			{Name: "jellyfin-desktop-libcef-bin", SystemPackage: true, Library: true, Optional: true},
+			{Name: "cef-minimal", SystemPackage: true, Library: true, Optional: true},
+			{Name: "cef-minimal-obs-bin", SystemPackage: true, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "gcc", SystemPackage: true},
 		},

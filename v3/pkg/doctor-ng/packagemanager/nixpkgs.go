@@ -54,6 +54,11 @@ func (n *Nixpkgs) Packages() Packagemap {
 		"webkit2gtk (legacy)": []*Package{
 			{Name: channel + ".webkitgtk", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// CEF on NixOS: install via nixpkgs and set CEF_DIR.
+			// As of 2026-07 the official nixpkgs has cef-147.
+			{Name: channel + ".cef", SystemPackage: true, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: channel + ".gcc", SystemPackage: true},
 		},

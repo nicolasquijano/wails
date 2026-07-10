@@ -38,6 +38,11 @@ func (e *Eopkg) Packages() Packagemap {
 		"webkit2gtk (legacy)": []*Package{
 			{Name: "libwebkit-gtk-devel", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// CEF is not packaged on Solus. Install from upstream tarball
+			// to /opt/cef and set CEF_DIR.
+			{Name: "cef (extract tarball to /opt/cef)", SystemPackage: false, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "gcc", SystemPackage: true},
 		},

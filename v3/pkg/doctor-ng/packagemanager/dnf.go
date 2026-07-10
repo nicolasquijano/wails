@@ -38,6 +38,11 @@ func (y *Dnf) Packages() Packagemap {
 			{Name: "webkit2gtk4.1-devel", SystemPackage: true, Library: true, Optional: true},
 			{Name: "webkit2gtk3-devel", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// CEF not in Fedora repos; extract from cefbuilds.com tarball
+			// or install a community-maintained package.
+			{Name: "chromium-libs-headless (provides some CEF deps)", SystemPackage: true, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "gcc-c++", SystemPackage: true},
 		},

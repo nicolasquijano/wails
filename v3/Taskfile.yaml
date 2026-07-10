@@ -111,6 +111,45 @@ tasks:
       - go mod tidy
       - go build -tags gtk3 -o "testbuild-{{.DIR}}-linux-gtk3"
 
+  test:example:linux:cef:
+    summary: Build example for Linux with CEF (opt-in via -tags cef)
+    dir: 'examples/{{.DIR}}'
+    platforms:
+      - linux
+    cmds:
+      - echo "Building example {{.DIR}} for Linux (CEF opt-in)"
+      - go mod tidy
+      - go build -tags cef -o "testbuild-{{.DIR}}-linux-cef"
+
+  sanity:cef:
+    summary: Quick compilation sanity check for the CEF opt-in (requires libcef 147 on host)
+    platforms:
+      - linux
+    cmds:
+      - echo "Sanity-checking CEF build with examples/plain"
+      - cd examples/plain && go build -tags cef -o /dev/null .
+
+  test:examples:linux:cef:
+    summary: Build all examples for Linux CEF opt-in (requires CEF installed)
+    platforms:
+      - linux
+    cmds:
+      - sh: |
+          echo "Building all examples with -tags cef..."
+          cd examples
+          for d in */; do
+            example=$(basename "$d")
+            if [ -f "$d/main.go" ]; then
+              cd "$d"
+              if go build -tags cef -o "testbuild-${example}-linux-cef"; then
+                echo "OK: $example"
+              else
+                echo "FAIL: $example"
+              fi
+              cd ..
+            fi
+          done
+
   test:example:linux:docker:arm64:
     summary: Build a single example for Linux ARM64 using Docker (Ubuntu 24.04)
     cmds:

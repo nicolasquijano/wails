@@ -39,6 +39,12 @@ func (e *Emerge) Packages() Packagemap {
 			{Name: "net-libs/webkit-gtk:4.1", SystemPackage: true, Library: true, Optional: true},
 			{Name: "net-libs/webkit-gtk:4", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// CEF is not in the official Gentoo tree; install from the
+			// cef-overlay at https://github.com/cef-overlay/cef-overlay
+			// or extract a tarball into /opt/cef.
+			{Name: "net-libs/cef", SystemPackage: true, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "sys-devel/gcc", SystemPackage: true},
 		},

@@ -29,6 +29,11 @@ func (x *Xbps) Packages() Packagemap {
 		"libwebkit": []*Package{
 			{Name: "libwebkit2gtk41-devel", SystemPackage: true, Library: true},
 		},
+		"cef (opt-in)": []*Package{
+			// Void Linux doesn't ship CEF; install from upstream tarball
+			// to /opt/cef and set CEF_DIR.
+			{Name: "cef (extract tarball)", SystemPackage: false, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "gcc", SystemPackage: true},
 		},

@@ -40,6 +40,11 @@ func (z *Zypper) Packages() Packagemap {
 			{Name: "webkit2gtk4_1-devel", SystemPackage: true, Library: true, Optional: true},
 			{Name: "webkit2gtk3-soup2-devel", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// openSUSE: install cef from OBS or extract upstream tarball
+			// to /opt/cef and set CEF_DIR.
+			{Name: "libcef (OBS home:mnhauke:cef)", SystemPackage: true, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "gcc-c++", SystemPackage: true},
 		},

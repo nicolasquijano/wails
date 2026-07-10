@@ -78,6 +78,8 @@ func (d *Doctor) collectDependencies() error {
 func categorizeLinuxDep(name string) string {
 	lower := strings.ToLower(name)
 	switch {
+	case strings.Contains(lower, "cef"):
+		return "cef"
 	case strings.Contains(lower, "gtk"):
 		return "gtk"
 	case strings.Contains(lower, "webkit"):

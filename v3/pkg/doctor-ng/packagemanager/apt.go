@@ -37,6 +37,13 @@ func (a *Apt) Packages() Packagemap {
 		"webkit2gtk (legacy)": []*Package{
 			{Name: "libwebkit2gtk-4.1-dev", SystemPackage: true, Library: true, Optional: true},
 		},
+		"cef (opt-in)": []*Package{
+			// CEF is not in Debian/Ubuntu repos. The official tarball
+			// lives at https://cef-builds.spotifycdn.com. Users can
+			// also install via a 3rd-party PPA like cef-team or
+			// extract the tarball into /opt/cef.
+			{Name: "libcef-dev (extract from cefbuilds.com tarball)", SystemPackage: false, Library: true, Optional: true},
+		},
 		"gcc": []*Package{
 			{Name: "build-essential", SystemPackage: true},
 		},
