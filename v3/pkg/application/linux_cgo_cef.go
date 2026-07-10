@@ -317,8 +317,10 @@ func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser 
 
 	settings := cef.NewBrowserSettings()
 
+	debugLog("[cefCreateBrowserInWidget] url=%q parentXID=%d", url, uint64(xid))
 	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync url=%q parentXID=%d\n", url, uint64(xid))
 	browser := cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
+	debugLog("[cefCreateBrowserInWidget] returned browser=%v", browser != nil)
 	fmt.Fprintf(os.Stderr, "wails/cef: BrowserHostCreateBrowserSync returned browser=%v\n", browser != nil)
 	return browser
 }

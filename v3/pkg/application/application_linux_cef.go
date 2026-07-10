@@ -18,6 +18,7 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -75,6 +76,28 @@ func isValidAppIDStart(c byte) bool {
 }
 
 func setProgramName(name string) { _ = name }
+
+// init runs in every process, including CEF helper subprocesses (zygote,
+// utility, gpu). It does the very first thing: check whether we are a CEF
+// helper subprocess and exit immediately if so. Without this, every helper
+// subprocess would also run the main() function, which calls App.Run,
+// which calls newPlatformApp, which calls cefInit — and we end up with
+// multiple CEF runtimes competing for the same process.
+//
+// In the main process this function is a no-op (cefInit hasn't been
+// called yet, so the library detection returns false).
+func init() {
+	// Detect via os.Args: CEF helper subprocesses are spawned with
+	// flags like --type=zygote, --type=utility, --type=gpu-process.
+	// We exit before doing any other init.
+	for _, a := range os.Args {
+		switch a {
+		case "--type=zygote", "--type=zygote-process", "--type=utility", "--type=gpu-process", "--type=renderer", "--type=broker", "--type=ppapi", "--type=ppapi-broker", "--type=audio-service", "--type=network-service", "--type=storage-service":
+			fmt.Fprintf(os.Stderr, "wails/cef: detected CEF helper subprocess (%s), exiting\n", a)
+			os.Exit(0)
+		}
+	}
+}
 
 // appRun and appDestroy are implemented in linux_cgo_cef.go.
 
@@ -207,9 +230,12 @@ func newPlatformApp(parent *App) *linuxApp {
 	// which only happens inside cef.Init(). Until Phase 6 we ignore the
 	// error and let run() surface it; here we call it once so the
 	// subsequent registrations work.
+	debugLog("[newPlatformApp] start")
 	if err := cefInit(); err != nil {
+		debugLog("[newPlatformApp] cefInit failed: %v", err)
 		parent.error("wails/cef: init failed (continuing, run() will surface): %v", err)
 	}
+	debugLog("[newPlatformApp] after cefInit")
 
 	// Wire the assetserver handler into the CEF request pipeline so CEF
 	// browsers can resolve wails:// URLs to embedded assets. This is

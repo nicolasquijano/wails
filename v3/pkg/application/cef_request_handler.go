@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
@@ -243,7 +244,7 @@ func isAssetURL(rawURL string) bool {
 // CEF then calls our GetResourceHandler which returns a body streamer.
 func (r *cefResourceRequestHandler) OnBeforeResourceLoad(_ cef.Browser, _ cef.Frame, request cef.Request, callback cef.Callback) cef.ReturnValue {
 	url := request.GetURL()
-	fmt.Fprintf(os.Stderr, "wails/cef: OnBeforeResourceLoad url=%q isAsset=%v\n", url, isAssetURL(url))
+	debugLog("[OnBeforeResourceLoad] url=%q isAsset=%v", url, isAssetURL(url))
 
 	if !isAssetURL(url) {
 		return cef.ReturnValueRvContinue
@@ -395,6 +396,21 @@ func (c *captureResponse) contentType() string {
 	return c.header.Get("Content-Type")
 }
 
+// debugLog writes to /tmp/wails-cef-debug.log. We use a file (not
+// stderr) because CEF's helper sub-processes redirect or close
+// stderr, so logs get lost. The file is append-only and timestamped
+// so we can correlate with CEF's own log.
+func debugLog(format string, args ...any) {
+	f, err := os.OpenFile("/tmp/wails-cef-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] ", time.Now().Format("15:04:05.000"))
+	fmt.Fprintf(f, format+"\n", args...)
+	_ = args
+}
+
 // -----------------------------------------------------------------------------
 // CefSchemeHandlerFactory — registers the "wails" custom scheme so that
 // CEF recognises wails:// URLs as a valid scheme before any request
@@ -420,14 +436,22 @@ func (f *cefWailsSchemeFactory) Create(_ cef.Browser, _ cef.Frame, _ string, _ c
 //
 // Returns true if registration succeeded.
 func registerWailsScheme() bool {
-	fmt.Fprintln(os.Stderr, "wails/cef: registerWailsScheme called")
+	f, _ := os.OpenFile("/tmp/wails-cef-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if f != nil {
+		defer f.Close()
+		fmt.Fprintf(f, "[registerWailsScheme] called at %v\n", time.Now().Format("15:04:05.000"))
+	}
 	ctx := cef.RequestContextGetGlobalContext()
 	if ctx == nil {
-		fmt.Fprintln(os.Stderr, "wails/cef: registerWailsScheme: ctx is nil")
+		if f != nil {
+			fmt.Fprintln(f, "[registerWailsScheme] ctx is nil")
+		}
 		return false
 	}
 	factory := cef.NewSchemeHandlerFactory(&cefWailsSchemeFactory{})
 	rc := ctx.RegisterSchemeHandlerFactory("wails", "", factory)
-	fmt.Fprintf(os.Stderr, "wails/cef: registerWailsScheme rc=%d\n", rc)
+	if f != nil {
+		fmt.Fprintf(f, "[registerWailsScheme] rc=%d\n", rc)
+	}
 	return rc == 1
 }

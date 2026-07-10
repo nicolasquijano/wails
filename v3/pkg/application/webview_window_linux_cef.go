@@ -87,6 +87,7 @@ func (w *linuxWebviewWindow) close() {
 // TODO(Phase 2): integrate asset server scheme handler
 // TODO(Phase 3): inject JS shim for wailsIPC
 func (w *linuxWebviewWindow) run() {
+	debugLog("[linuxWebviewWindow.run] starting url=%q", w.parent.options.URL)
 	fmt.Fprintf(os.Stderr, "wails/cef: linuxWebviewWindow.run() starting url=%q\n", w.parent.options.URL)
 
 	app := getNativeApplication()
@@ -96,19 +97,25 @@ func (w *linuxWebviewWindow) run() {
 		app.application,
 		w.parent.id,
 	)
+	debugLog("[linuxWebviewWindow.run] cefCreateHostWindow window=%v vbox=%v", w.window != nil, w.vbox != nil)
 	fmt.Fprintf(os.Stderr, "wails/cef: cefCreateHostWindow returned window=%v vbox=%v\n", w.window != nil, w.vbox != nil)
 
 	// 2. Register window in app's window map.
 	app.registerWindow(w.window, w.parent.id)
+	debugLog("[run] after registerWindow")
 
 	// 3. Apply options (title, size, frameless, etc.).
 	title := w.parent.options.Title
 	if title == "" {
 		title = w.parent.options.Name
 	}
+	debugLog("[run] before setTitle(%q) window=%v", title, w.window != nil)
 	w.setTitle(title)
+	debugLog("[run] after setTitle")
 	w.setDefaultSize(w.parent.options.Width, w.parent.options.Height)
+	debugLog("[run] after setDefaultSize")
 	w.setSize(w.parent.options.Width, w.parent.options.Height)
+	debugLog("[run] after setSize")
 	if w.parent.options.BackgroundType != BackgroundTypeSolid {
 		w.setTransparent()
 		w.setBackgroundColour(w.parent.options.BackgroundColour)
@@ -117,11 +124,14 @@ func (w *linuxWebviewWindow) run() {
 	w.setResizable(!w.parent.options.DisableResize)
 	w.setAlwaysOnTop(w.parent.options.AlwaysOnTop)
 
+	debugLog("[linuxWebviewWindow.run] about to call cefCreateBrowserInWidget vbox=%v url=%q", w.vbox != nil, w.parent.options.URL)
+
 	// 4. Create CEF browser attached to the GtkBox.
 	w.browser = cefCreateBrowserInWidget(
 		unsafe.Pointer(w.vbox),
 		w.parent.options.URL,
 	)
+	debugLog("[linuxWebviewWindow.run] cefCreateBrowserInWidget returned browser=%v", w.browser != nil)
 
 	// 5. Show the GTK window.
 	w.show()
