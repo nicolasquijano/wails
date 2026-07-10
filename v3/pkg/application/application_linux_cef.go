@@ -187,6 +187,15 @@ func newPlatformApp(parent *App) *linuxApp {
 		setCefAssetsHandler(parent.assets)
 	}
 
+	// Wire the message processor into the CEF V8 handler so JS calls to
+	// window.wails.* land in the same router as HTTP/WS transports.
+	setCefMessageProcessor(parent)
+
+	// Install the V8 extension BEFORE any browser is created. CEF only
+	// loads extensions that were registered before the browser's
+	// render process started.
+	registerCEFExtension()
+
 	return app
 }
 

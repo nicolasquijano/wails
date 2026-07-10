@@ -617,8 +617,8 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | 0 | Build tag scaffolding | ✅ COMPLETE (2026-07-09) | ~15 diffs | 14 modified |
 | 1 | First CEF build (purego-cef + GTK4 host) | ✅ COMPLETE (2026-07-09) | ~900 LOC | 6 new + 1 dep |
 | 2 | Asset server bridge (route + detect, no body) | ✅ COMPLETE (2026-07-09) | ~300 LOC | 2 new + 1 modified |
-| 3 | IPC JS↔Go via CefV8Handler | 📋 PENDING | ~400 | 2 new |
-| 4 | Devtools/permisos/DnD/menu + **CEF body streaming** | 📋 PENDING | ~700 | modifications |
+| 3 | JS↔Go IPC via CefV8Handler + RegisterExtension | ✅ COMPLETE (2026-07-09) | ~350 LOC | 3 new + 1 modified |
+| 4 | Devtools/permisos/DnD/menu + **CEF body streaming** + **return values** | 📋 PENDING | ~700 | modifications |
 | 5 | doctor-ng + packaging | 📋 PENDING | ~150 | 8 modified |
 | 6 | Examples + CI + docs | 📋 PENDING | varies | 1 new + tasks |
 
@@ -814,3 +814,77 @@ streamed.
 **Next**: Phase 3 (JS↔Go IPC) — inject `window.wails` shim that routes
 calls through a CefV8Handler → `messageprocessor`. Phase 4 will then
 add the missing body streaming + scheme registration + devtools/dnd/permissions.
+
+#### 2026-07-09 (Session C.0e — Phase 3)
+
+**Goal**: Wire the JS↔Go IPC bridge so that `window.wails.invoke(json)`
+on the frontend lands in the existing `MessageProcessor`. Use CEF's
+`RegisterExtension` (which auto-injects a JS shim before any page
+script) plus a `CefV8Handler` to receive the native calls.
+
+**Architecture**:
+- The JS shim (`cef_js_shim.js`) is embedded via `//go:embed` and
+  passed to `cef.RegisterExtension("wails.cef", code, handler)`. CEF
+  runs the shim in the renderer's V8 context BEFORE any page script.
+- The shim defines `native function wails_invoke(...)` etc. that
+  forward to a Go-side `cefV8Router` implementing `cef.V8Handler`.
+- The router deserializes the JSON request, calls
+  `MessageProcessor.HandleRuntimeCallWithIDs`, and (in Phase 4) writes
+  the result back to JS via the retval out-param.
+
+**Files created** (3 new, ~350 LOC):
+- `v3/pkg/application/cef_js_shim.js` (~80 LOC JS) — V8 extension code
+  that defines `wails_invoke`, `wails_callback`, `wails_log`,
+  `wails_setFlags`, `wails_setEnvironment`, `wails_emit` as native
+  functions; also patches `console.log/warn/error` to relay into Go.
+- `v3/pkg/application/cef_js_shim_embed.go` (~15 LOC) — `//go:embed`
+  wrapper exposing the JS as a string.
+- `v3/pkg/application/cef_v8_handler.go` (~250 LOC) — `cefV8Router`
+  dispatches by native-function name. `wails_invoke` deserializes
+  the JSON, calls MessageProcessor, and logs the result.
+  `wails_log` pipes browser console into the App logger.
+
+**Files modified** (1):
+- `v3/pkg/application/application_linux_cef.go` — `newPlatformApp` now
+  calls `setCefMessageProcessor(parent)` and `registerCEFExtension()`
+  so the V8 handler is wired and the extension installed before any
+  browser is created.
+
+**Wiring**:
+- `setCefMessageProcessor(app)` stores `app.messageProcessor` in the
+  package-level `cefV8Proc` (behind a RWMutex). The V8 handler reads
+  it on every invoke.
+- `registerCEFExtension()` is wrapped in `sync.Once` so it runs exactly
+  once per process. CEF requires extensions to be registered before
+  the render process is spawned.
+
+**Verification**:
+```
+go build ./pkg/application/                          exit 0  (default webgtk)
+go build -tags gtk3 ./pkg/application/              exit 0  (legacy)
+go build -tags server ./pkg/application/            exit 0
+go build -tags cef ./pkg/application/               exit 0  ← NEW (Phase 3)
+cd examples/plain && go build -tags cef -o /tmp/cef-phase3-test  exit 0 (18MB ELF)
+```
+
+**Phase 3 limitations** (Phase 4 will fix):
+- The retval out-param is not yet populated — JS-side Promises
+  resolve to `undefined`. Fix requires CefV8Value::CreateString
+  plus a Retain dance that purego-cef doesn't expose yet.
+- Exception path is logged to stderr instead of being surfaced to JS
+  as a TypeError.
+- Async callback resolution (Go→JS Promise resolve via
+  `window.wails.handleCallback`) is a Phase 4 feature.
+- Flags / environment injection (the shim's
+  `wails_setFlags`/`wails_setEnvironment` callbacks) is a Phase 4
+  feature: Go pushes the JSON once at startup, JS caches it in
+  `window._wails.flags` / `.environment`.
+- `window._wails.dispatchWailsEvent` (the Go→JS event push) is wired
+  via the existing `WebviewWindow::ExecJS` which calls
+  `WebviewWindow::ExecJS` and ultimately `LinuxWebviewWindow::execJS`.
+  Phase 4 will add a per-frame CefFrame::ExecuteJavaScript call so
+  the event lands in the right V8 context.
+
+**Next**: Phase 4 — body streaming (CefResourceHandler.ReadResponse),
+return values (CefV8Value retval out-param), full flags/environment
+injection, and event delivery via CefFrame::ExecuteJavaScript.
