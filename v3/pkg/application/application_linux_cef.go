@@ -170,7 +170,7 @@ func (a *linuxApp) show() {}
 
 func (a *linuxApp) on(eventID uint) {}
 
-func (a *linuxApp) isOnMainThread() bool { return true }
+func (a *linuxApp) isOnMainThread() bool { return cefIsOnMainThread() }
 
 func (a *linuxApp) appendGTKVersion(result map[string]string) {
 	result["GTK"] = fmt.Sprintf("%d.%d.%d",
@@ -233,7 +233,11 @@ func newPlatformApp(parent *App) *linuxApp {
 	debugLog("[newPlatformApp] start")
 	if err := cefInit(); err != nil {
 		debugLog("[newPlatformApp] cefInit failed: %v", err)
-		parent.error("wails/cef: init failed (continuing, run() will surface): %v", err)
+		// CEF objects such as V8 handlers require a successful cef.Init.
+		// Leave the app unconfigured so run() can return the initialization
+		// error instead of panicking while constructing those objects.
+		parent.error("wails/cef: init failed (run() will return the error): %v", err)
+		return app
 	}
 	debugLog("[newPlatformApp] after cefInit")
 
@@ -318,21 +322,37 @@ func getNativeApplication() *linuxApp {
 	return globalApplication.impl.(*linuxApp)
 }
 
-// dispatchOnMainThread runs `fn` on the GTK main thread. In Phase 1 we
-// just call fn synchronously since CEF and GTK share the same main OS
-// thread and we don't pump the GTK loop from inside this file.
+// dispatchOnMainThread queues work on GTK's default GLib main context. App.Run
+// starts pending windows from worker goroutines before entering
+// g_application_run, so executing them directly can create GTK/CEF objects on
+// the wrong OS thread. g_idle_add lets the loop take ownership first.
 func (a *linuxApp) dispatchOnMainThread(id uint) {
-	InvokeSync(func() {})
-	_ = id
+	cefDispatchOnMainThread(id)
+}
+
+// executeOnMainThread consumes a callback that App.dispatchOnMainThread
+// queued for the GTK main context. The equivalent helper in
+// mainthread_linux.go is excluded from CEF builds.
+func executeOnMainThread(callbackID uint) {
+	mainThreadFunctionStoreLock.Lock()
+	fn := mainThreadFunctionStore[callbackID]
+	if fn == nil {
+		mainThreadFunctionStoreLock.Unlock()
+		Fatal("dispatchCallback called with invalid id: %v", callbackID)
+		return
+	}
+	delete(mainThreadFunctionStore, callbackID)
+	mainThreadFunctionStoreLock.Unlock()
+	fn()
 }
 
 // processAndCacheScreens, setupCommonEvents, monitorPowerEvents, hideAllWindows,
 // showAllWindows, isOnMainThread helpers are Phase 1 stubs (the real ones live
 // in screen_linux.go / application_linux.go which we exclude from -tags cef).
 func (a *linuxApp) processAndCacheScreens() error { return nil }
-func (a *linuxApp) setupCommonEvents()             {}
-func (a *linuxApp) hideAllWindows()                {}
-func (a *linuxApp) showAllWindows()                {}
+func (a *linuxApp) setupCommonEvents()            {}
+func (a *linuxApp) hideAllWindows()               {}
+func (a *linuxApp) showAllWindows()               {}
 
 // logPlatformInfo / platformEnvironment are Phase 1 stubs (real implementations
 // live in application_linux.go / environment_manager.go; we exclude those).

@@ -178,7 +178,7 @@ func (r *cefV8Router) handleInvoke(msg string, retval unsafe.Pointer, exception 
 // the render process in its own log; we add a clear prefix). Phase 4
 // will route this through the App logger via a CefV8Value::CreateString.
 func cefLogException(msg string) {
-	fmt.Fprintf(os.Stderr, msg+"\n")
+	fmt.Fprintln(os.Stderr, msg)
 }
 
 // writeV8Retval writes a CefV8Value handle into CEF's retval out-param.
@@ -197,7 +197,7 @@ func writeV8Retval(retval unsafe.Pointer, v cef.V8Value) {
 	// for a pointer-implementing type holds the pointer in its data
 	// word on amd64.
 	type ifaceHeader struct {
-		_ uintptr
+		_    uintptr
 		data unsafe.Pointer
 	}
 	h := (*ifaceHeader)(unsafe.Pointer(&v)).data
@@ -235,10 +235,10 @@ func logCefConsole(level, msg string) {
 	}
 	switch level {
 	case "warn":
-		app.warning("[browser] " + msg)
+		app.warning("%s", "[browser] "+msg)
 	case "error":
-		app.error("[browser] " + msg)
+		app.error("%s", "[browser] "+msg)
 	default:
-		app.info("[browser] " + msg)
+		app.info("%s", "[browser] "+msg)
 	}
 }

@@ -15,8 +15,41 @@ package application
 #include <X11/Xlib.h>
 
 // Trivial callback used to satisfy g_application's "activate" signal.
-void cef_activate_cb(GApplication *app, gpointer data) {
+static void cef_activate_cb(GApplication *app, gpointer data) {
 	(void) app; (void) data;
+}
+
+// Go owns the callback registry. GLib only needs an integer key to dispatch
+// a queued function on the thread that owns the default main context.
+extern void dispatchOnMainThreadCallback(unsigned int id);
+
+static gboolean cef_dispatch_on_main_thread_cb(gpointer data) {
+	dispatchOnMainThreadCallback(GPOINTER_TO_UINT(data));
+	return G_SOURCE_REMOVE;
+}
+
+static void cef_dispatch_on_main_thread(unsigned int id) {
+	g_idle_add_full(
+		G_PRIORITY_DEFAULT,
+		cef_dispatch_on_main_thread_cb,
+		GUINT_TO_POINTER(id),
+		NULL
+	);
+}
+
+static gboolean cef_is_on_main_thread(void) {
+	return g_main_context_is_owner(g_main_context_default());
+}
+
+static void cef_connect_activate(GApplication *app) {
+	g_signal_connect_data(
+		app,
+		"activate",
+		G_CALLBACK(cef_activate_cb),
+		NULL,
+		NULL,
+		0
+	);
 }
 
 // cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid` (the
@@ -115,7 +148,6 @@ func cefInit() error {
 	if cefInitOnce {
 		return nil
 	}
-	cefInitOnce = true
 
 	cefSettings = cef.Settings{
 		MultiThreadedMessageLoop: false, // We pump manually from GTK loop.
@@ -128,7 +160,11 @@ func cefInit() error {
 	// subprocess (renderer, GPU, etc.).
 	cef.MaybeExitSubprocess()
 
-	return cef.Init(cefSettings)
+	if err := cef.Init(cefSettings); err != nil {
+		return err
+	}
+	cefInitOnce = true
+	return nil
 }
 
 // cefShutdown shuts down the CEF runtime.
@@ -144,6 +180,19 @@ func cefShutdown() {
 // Must be called from the GTK main thread.
 func cefDoMessageLoopWork() {
 	cef.DoMessageLoopWork()
+}
+
+func cefDispatchOnMainThread(id uint) {
+	C.cef_dispatch_on_main_thread(C.uint(id))
+}
+
+func cefIsOnMainThread() bool {
+	return C.cef_is_on_main_thread() != 0
+}
+
+//export dispatchOnMainThreadCallback
+func dispatchOnMainThreadCallback(callbackID C.uint) {
+	executeOnMainThread(uint(callbackID))
 }
 
 // cefAttachToGTKWidget reparents the X11 window backing a CEF browser view
@@ -177,19 +226,7 @@ func appRun(app pointer) error {
 	application := (*C.GApplication)(app)
 	C.g_application_hold(application)
 
-	// Connect "activate" to the trivial callback. We use
-	// g_signal_connect_data (the non-macro variant) so cgo's type
-	// checker sees the function pointer correctly.
-	activate := C.CString("activate")
-	defer C.free(unsafe.Pointer(activate))
-	C.g_signal_connect_data(
-		C.gpointer(unsafe.Pointer(application)),
-		activate,
-		(*[0]byte)(unsafe.Pointer(C.cef_activate_cb)),
-		nil,
-		nil,
-		0,
-	)
+	C.cef_connect_activate(application)
 
 	status := C.g_application_run(application, 0, nil)
 	_ = status
@@ -273,11 +310,11 @@ func cefDestroyWindow(window pointer) {
 //
 // Implementation note: Phase 4.2 fixes the Phase 1 SetAsWindowless stub
 // which produced an invisible browser. The new path uses:
-//   1. gtk_widget_get_native → gtk_native_get_surface →
-//      gdk_x11_surface_get_xid to read the widget's X11 handle.
-//   2. Set ParentWindow on the WindowInfo to the widget XID.
-//   3. BrowserHostCreateBrowserSync creates a child X11 window under
-//      the widget, visible as soon as XMapWindow runs.
+//  1. gtk_widget_get_native → gtk_native_get_surface →
+//     gdk_x11_surface_get_xid to read the widget's X11 handle.
+//  2. Set ParentWindow on the WindowInfo to the widget XID.
+//  3. BrowserHostCreateBrowserSync creates a child X11 window under
+//     the widget, visible as soon as XMapWindow runs.
 func cefCreateBrowserInWidget(gtkWidget unsafe.Pointer, url string) cef.Browser {
 	if gtkWidget == nil {
 		return nil

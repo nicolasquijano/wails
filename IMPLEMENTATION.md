@@ -577,7 +577,7 @@ v3/internal/assetserver/webview/
 
 **Branch**: `feat/linux-cef`
 **Started**: 2026-07-09
-**Status**: 📋 PLANNING (Fase 0 pending)
+**Status**: 🔄 IN PROGRESS — browser creation is pending runtime verification
 
 ### Goal
 
@@ -624,7 +624,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | 4.3 | Replace SetAsWindowless with X11 child attach | ✅ COMPLETE (2026-07-10) | ~30 LOC | 1 modified |
 | 4.4 | Register wails scheme, debug logging | ✅ COMPLETE (2026-07-10) | ~60 LOC | 5 modified |
 | 4.5 | Subprocess detection + file-based debug log | ✅ COMPLETE (2026-07-10) | ~70 LOC | 4 modified |
-| 4.6 | Browser creation deadlock | ❌ BLOCKED | n/a | n/a |
+| 4.6 | Dispatch browser creation through the GTK main context | 🔄 IN PROGRESS (2026-07-10) | ~40 LOC | 3 modified |
 | 5 | doctor-ng + packaging | ✅ COMPLETE (2026-07-10) | ~50 LOC | 7 modified |
 | 6 | Examples + CI + docs | ✅ COMPLETE (2026-07-10) | ~250 LOC | 3 new + 1 modified |
 
@@ -1060,7 +1060,7 @@ creation dance.
 - Detected helper subprocesses in init() (Phase 4.5): no more
   parallel CEF runtimes competing for the same process.
 
-**What was found (BLOCKED)**:
+**What was found**:
 - debugLog file `/tmp/wails-cef-debug.log` shows:
   ```
   [newPlatformApp] start
@@ -1092,19 +1092,23 @@ creation dance.
   CEF never gets the `cefCreateBrowserInWidget` call to render
   content.
 
-**Next step (Phase 4.6+)**:
-Two ways forward:
-1. **Restructure the main loop** to not block on g_application_run
-   (e.g. register a g_idle callback that runs when the GTK loop is
-   idle, so the CEF window creation happens on the right thread
-   without needing InvokeSync).
-2. **Create the browser BEFORE the main loop starts**. Webview
-   creation must happen before g_application_run so the
-   InvokeSync semaphore works correctly.
+**Fix applied (pending runtime verification)**:
+- `linuxApp.dispatchOnMainThread` now queues callbacks with
+  `g_idle_add_full` on GTK's default GLib main context.
+- `linuxApp.isOnMainThread` now asks GLib whether that context is owned
+  by the current thread, rather than treating every goroutine as GTK's
+  main thread.
+- This lets the pending window startup wait until `g_application_run`
+  owns the context, then executes `cefCreateBrowserInWidget` there.
 
-Both are non-trivial refactors of `application_linux_cef.go`. The
-branch remains in a state where the build pipeline is correct but
-the runtime integration is incomplete.
+The branch remains incomplete until a CEF 147 end-to-end smoke test confirms
+that the browser is created and loads `wails://` content.
+
+**Runtime guard**: when `cefInit` rejects an incompatible runtime, startup no
+longer constructs V8/scheme objects that require CEF's reference manager. The
+subsequent `run()` returns the original initialization error cleanly. The CEF
+initialization flag is set only after `cef.Init` succeeds, so a failed first
+attempt cannot make a later call falsely report success.
 
 #### 2026-07-10 (Session C.0h — Phases 5 + 6)
 
