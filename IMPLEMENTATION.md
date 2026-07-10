@@ -619,6 +619,7 @@ Add CEF as a third webview backend on Linux, behind `-tags cef`, while preservin
 | 2 | Asset server bridge (route + detect, no body) | ✅ COMPLETE (2026-07-09) | ~300 LOC | 2 new + 1 modified |
 | 3 | JS↔Go IPC via CefV8Handler + RegisterExtension | ✅ COMPLETE (2026-07-09) | ~350 LOC | 3 new + 1 modified |
 | 4 | Body streaming + return values + flags/env + events | ✅ COMPLETE (2026-07-09) | ~250 LOC diff | 2 modified |
+| 4.1 | Smoke test: link against real libcef + first run | 🚧 PARTIAL (2026-07-10) | n/a (no CEF 147 available locally) | 0 modified |
 | 5 | doctor-ng + packaging | 📋 PENDING | ~150 | 8 modified |
 | 6 | Examples + CI + docs | 📋 PENDING | varies | 1 new + tasks |
 
@@ -953,3 +954,86 @@ CEF 147 binaries are not installed on the build host.
 end-to-end tests (optional: install libcef locally and verify
 that a wails:// page actually loads with content). Phase 6 will
 add the `examples/cef-hello` directory + CI workflow.
+
+#### 2026-07-10 (Session C.0g — Phase 4.1 smoke test, partial)
+
+**Goal**: First end-to-end run with a real libcef. Discover which of
+the 6 issues hypothesised in the prior session actually fire.
+
+**Discovery**: libcef 147 is not on this host (Spotify CDN 403, no
+Arch package). However, **Steam ships a libcef.so at
+`~/.local/share/Steam/ubuntu12_64/libcef.so`** — but it's
+`Chrome/126.0.6478.183`, which is too old for the binding.
+
+**Discovered facts** (from running with Steam's libcef via
+`CEF_DIR=~/.local/share/Steam/ubuntu12_64 CEF_VERSION=126`):
+
+1. ✅ **libcef loads successfully**. purego.Dlopen + dlopen pass.
+2. ✅ **The binary starts up correctly** — gets through GTK
+   initialisation, App.Run(), and into newPlatformApp.
+3. ✅ **GTK4 + DBus warning (Gtk-CRITICAL)** was a real bug in the
+   Phase 1 `sanitizeAppName` stub: it produced IDs like `ARCA_BOT`
+   that fail `g_application_id_is_valid`. **Fixed**: lowercase +
+   `io.wails.` prefix when no dot.
+
+4. ✅ **Init order bug (Issue #1 from prior session) — confirmed**.
+   Original order was:
+   ```
+   newPlatformApp → setCefMessageProcessor → cef.NewV8Handler
+                  → registerCEFExtension    → cef.RegisterExtension
+   App.Run        → linuxApp.run            → cefInit
+   ```
+   `NewV8Handler` and `RegisterExtension` panicked with
+   "ref manager not initialized; call cef.Init() first" because
+   they ran BEFORE cefInit. **Fixed**: moved `cefInit()` into
+   `newPlatformApp` BEFORE the registrations.
+
+5. ❌ **Binding incompatibility (Issue #5, partial)**:
+   ```
+   panic: undefined symbol: cef_set_nestable_tasks_allowed
+   ```
+   Steam's libcef (Chrome 126) does NOT export this symbol, but
+   purego-cef v0.13.3 (built against CEF 147) requires it.
+   Hard wall — cannot smoke-test with CEF < 147. To verify the
+   remaining 4 issues we need CEF 147 on the host.
+
+**What this session accomplished**:
+- 2 real bugs found and fixed (init order + appID).
+- Confirmed binding + GTK host wiring compiles to a binary that
+  successfully dlopens libcef.
+- Identified the concrete blocker: **need CEF 147 installed**.
+
+**To finish Option A** ("compila y arranca"):
+
+```
+# Install CEF 147 to one of these locations:
+#   /usr/lib/cef/        ← system path
+#   ~/.local/share/cef/   ← user path
+#   $CEF_DIR=...          ← explicit override
+#
+# Recommended for CachyOS (Arch-based):
+yay -S cef-minimal    # if AUR has a current build
+# OR manually:
+sudo mkdir -p /opt/cef
+sudo curl -L -o /tmp/cef.tar.bz2 \
+  https://cef-builds.spotifycdn.com/cef_binary_147.4.5+g5e8a8e7+chromium-147.4.5_linux64_minimal.tar.bz2
+sudo tar -xjf /tmp/cef.tar.bz2 -C /opt/cef --strip-components=1
+sudo ln -sf /opt/cef/libcef.so /usr/lib/cef/libcef.so
+
+# Then verify:
+cd v3/examples/plain
+go build -tags cef -o /tmp/cef-test .
+CEF_DIR=/opt/cef /tmp/cef-test
+# Expected: GTK window opens, loads /, shows assetserver's default index.
+```
+
+**Smoke-test results with CEF 126 (the run we did manage)**:
+- ✅ Process starts
+- ✅ dlopen succeeds
+- ✅ AssetServer logger fires
+- ✅ Build Info banner shows `tags=cef`
+- ❌ Symbol mismatch on `cef_set_nestable_tasks_allowed` (CEF 126 vs 147)
+
+**Next**: Get CEF 147 installed to finish Option A. The remaining 4
+issues (body streaming return values, DevTools, window resize, GTK
+main loop integration) can only be verified end-to-end with CEF 147.

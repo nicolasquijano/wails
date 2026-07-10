@@ -31,13 +31,43 @@ func appName() string {
 	return globalApplication.options.Name
 }
 
+// sanitizeAppName converts a free-form app name into a string that
+// GTK4's g_application_id_is_valid accepts. GTK4 / D-Bus require:
+//
+//   - lowercase only
+//   - at least one '.' (reverse-DNS style)
+//   - each component starts with [a-z]
+//
+// We always prefix with "io.wails." when the input doesn't already
+// contain a dot, which matches the upstream webgtk default.
 func sanitizeAppName(name string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+	if name == "" {
+		return "io.wails.app"
+	}
+	out := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
 			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		case r == '.', r == '_', r == '-':
+			return r
+		default:
+			return '_'
 		}
-		return '_'
 	}, name)
+
+	if !strings.Contains(out, ".") {
+		out = "io.wails." + out
+	}
+	if out == "" || !isValidAppIDStart(out[0]) {
+		out = "io.wails." + out
+	}
+	return out
+}
+
+func isValidAppIDStart(c byte) bool {
+	return c >= 'a' && c <= 'z'
 }
 
 func setProgramName(name string) { _ = name }
@@ -177,6 +207,15 @@ func newPlatformApp(parent *App) *linuxApp {
 
 	if parent.options.Linux.ProgramName != "" {
 		setProgramName(parent.options.Linux.ProgramName)
+	}
+
+	// Initialize CEF FIRST. Every other CEF API (NewV8Handler,
+	// RegisterExtension, etc.) requires the ref manager to be set up,
+	// which only happens inside cef.Init(). Until Phase 6 we ignore the
+	// error and let run() surface it; here we call it once so the
+	// subsequent registrations work.
+	if err := cefInit(); err != nil {
+		parent.error("wails/cef: init failed (continuing, run() will surface): %v", err)
 	}
 
 	// Wire the assetserver handler into the CEF request pipeline so CEF
