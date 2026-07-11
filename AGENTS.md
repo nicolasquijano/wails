@@ -172,6 +172,25 @@ When updating IMPLEMENTATION.md:
 docs: update implementation tracker for [phase/feature]
 ```
 
+## CEF Implementation Tracking (CEF_IMPLEMENTATION.md)
+
+The `CEF_IMPLEMENTATION.md` file at the repository root tracks the Chromium Embedded Framework (CEF) backend (`-tags cef`). It is a **persistent tracking document**, not an ephemeral planning document. It documents architecture decisions, implementation phases, known issues, and file references.
+
+### Requirements
+
+1. **Update with EVERY commit** that touches CEF code (`v3/pkg/application/*cef*.go`, `v3/examples/cef-*/`)
+2. **Track all architectural decisions** with context, decision, and rationale
+3. **Maintain progress status** for each implementation phase
+4. **Document known issues and blockers** with severity levels
+5. **Keep file references and commit log** accurate and up-to-date
+
+### Commit Message Pattern
+
+When updating CEF_IMPLEMENTATION.md:
+```
+docs: update cef implementation tracker for [phase/feature]
+```
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
