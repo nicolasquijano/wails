@@ -4,6 +4,7 @@ package application
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -99,6 +100,13 @@ func (h *cefRequestHandler) OnRenderViewReady(_ cef.Browser) {}
 // fully parsed. We use this opportunity to push the wails.flags /
 // wails.environment into the V8 context so the runtime JS can read
 // them from window._wails.flags and window._wails.environment.
+//
+// Also injects the CEF-specific security knobs:
+//   - window._wails.cefAllowedMethods — JS array; empty means "allow all"
+//   - window._wails.cefEnforceNonce — 1 / 0 flag for CSRF enforcement
+//   - window._wails.cefNonce — per-navigation random nonce (only set
+//     when EnforceCSRFNonce is true)
+// The wrapper in cef_js_shim.js reads these on every invoke.
 func (h *cefRequestHandler) OnDocumentAvailableInMainFrame(browser cef.Browser) {
 	frame := browser.GetMainFrame()
 	if frame == nil {
@@ -109,8 +117,104 @@ func (h *cefRequestHandler) OnDocumentAvailableInMainFrame(browser cef.Browser) 
 	// encoded here to avoid breaking the JS string literal.
 	flags := getCefFlagsJSON()
 	env := getCefEnvironmentJSON()
-	js := "if(window._wails){window._wails.flags=" + flags + ";window._wails.environment=" + env + ";}"
+	browserID := browser.GetIdentifier()
+
+	// Per-navigation nonce. We always generate one (it's cheap) so the
+	// wrapper can opt in at any time without a re-navigation. The
+	// wrapper reads it from window._wails.cefNonce and verifies the
+	// second arg of wails_invoke against it when cefEnforceNonce=1.
+	nonce := generateCefCSPNonce()
+
+	js := "if(window._wails){window._wails.flags=" + flags + ";window._wails.environment=" + env + ";"
+	// Expose the CEF browser id to JS so the drag-drop shim can call
+	// wails_cefResolveDrop(id, x, y) and reach the right Go window.
+	// 0 is a safe sentinel (no registered window has id 0).
+	js += "window._wailsCefBrowserId=" + intToJSNumber(int(browserID)) + ";"
+	js += buildCefSecurityInjection(nonce) + "}"
 	frame.ExecuteJavaScript(js, "", 0)
+}
+
+// generateCefCSPNonce returns a fresh 128-bit nonce as a base16 string.
+// Used as a per-navigation CSRF token that JS-side wrappers must
+// present when EnforceCSRFNonce is on. Cheap (8 bytes from crypto/rand
+// + hex-encode), so we generate one per navigation regardless of
+// whether enforcement is enabled — the wrapper reads
+// window._wails.cefEnforceNonce at call time.
+func generateCefCSPNonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to a timestamp-derived nonce on entropy failure.
+		// Still unique enough to defeat trivial replay; not a
+		// security boundary by itself.
+		ts := time.Now().UnixNano()
+		for i := 0; i < 8; i++ {
+			b[i] = byte(ts >> (8 * i))
+		}
+	}
+	const hex = "0123456789abcdef"
+	out := make([]byte, 16)
+	for i := 0; i < 8; i++ {
+		out[2*i] = hex[b[i]>>4]
+		out[2*i+1] = hex[b[i]&0x0f]
+	}
+	return string(out)
+}
+
+// appendJSQuoted writes a JS string literal (with surrounding quotes)
+// for the given Go string to dst. Standard C0 + quote + backslash escapes;
+// multi-byte UTF-8 passes through. Used for the nonce literal which
+// is generated from random bytes and may include any byte.
+func appendJSQuoted(dst []byte, s string) []byte {
+	dst = append(dst, '\'')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\'':
+			dst = append(dst, '\\', '\'')
+		case '\\':
+			dst = append(dst, '\\', '\\')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			if c < 0x20 || c == 0x7f {
+				dst = append(dst, '\\', 'u', '0', '0',
+					byte('0'+(c>>4)), byte('0'+(c&0x0f)))
+			} else {
+				dst = append(dst, c)
+			}
+		}
+	}
+	dst = append(dst, '\'')
+	return dst
+}
+
+// intToJSNumber converts an int32 to a JS numeric literal. We use
+// this rather than fmt.Sprintf so the output is deterministic across
+// Go versions (no exponential notation, no leading zeros).
+func intToJSNumber(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	negative := n < 0
+	if negative {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if negative {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }
 
 func (h *cefRequestHandler) OnRenderProcessUnresponsive(_ cef.Browser, _ cef.UnresponsiveProcessCallback) int32 {
@@ -182,6 +286,77 @@ func computeCefFlagsEnv(app *App) (flagsJSON, envJSON string) {
 	}
 	envBytes, _ := jsonMarshal(env)
 	return string(flagsBytes), string(envBytes)
+}
+
+// cefSecurityCache holds the per-process security configuration that's
+// injected into every V8 context via OnDocumentAvailableInMainFrame.
+// Read by the JS wrapper in cef_js_shim.js.
+//
+// The values are computed once at app-init and re-read on every
+// document load (cheap; two int + one slice).
+var cefSecurityCache = struct {
+	sync.RWMutex
+	allowedMethodsJSON string
+	enforceCSRFNonce   bool
+}{}
+
+// setCefSecurityOptions caches the SecurityOptions values for the
+// JS wrapper. Called from newPlatformApp after the App is built.
+// Empty AllowedMethods + EnforceCSRFNonce=false is the default
+// (no restriction) — see Decision C14.
+func setCefSecurityOptions(app *App) {
+	cefSecurityCache.Lock()
+	defer cefSecurityCache.Unlock()
+	if app == nil {
+		cefSecurityCache.allowedMethodsJSON = "[]"
+		cefSecurityCache.enforceCSRFNonce = false
+		return
+	}
+	if len(app.options.Security.AllowedMethods) == 0 {
+		cefSecurityCache.allowedMethodsJSON = "[]"
+	} else {
+		// JSON-encode the slice; the wrapper parses it back via
+		// indexOf on the resulting array.
+		b, err := jsonMarshal(app.options.Security.AllowedMethods)
+		if err != nil {
+			cefSecurityCache.allowedMethodsJSON = "[]"
+		} else {
+			cefSecurityCache.allowedMethodsJSON = string(b)
+		}
+	}
+	cefSecurityCache.enforceCSRFNonce = app.options.Security.EnforceCSRFNonce
+}
+
+// buildCefSecurityInjection returns the JS literal fragment that
+// sets window._wails.cefAllowedMethods / .cefEnforceNonce in the
+// current V8 context. The fragment is appended to the
+// OnDocumentAvailableInMainFrame injection alongside the flags/env
+// push. Reads the cached values from cefSecurityCache.
+//
+// On non-CEF builds the function compiles away to an empty string
+// because the caller is also CEF-only.
+func buildCefSecurityInjection(nonce string) string {
+	cefSecurityCache.RLock()
+	defer cefSecurityCache.RUnlock()
+	var sb []byte
+	sb = append(sb, "window._wails.cefAllowedMethods="...)
+	sb = append(sb, cefSecurityCache.allowedMethodsJSON...)
+	sb = append(sb, ';')
+	if cefSecurityCache.enforceCSRFNonce {
+		sb = append(sb, "window._wails.cefEnforceNonce=1;"...)
+	} else {
+		sb = append(sb, "window._wails.cefEnforceNonce=0;"...)
+	}
+	if nonce != "" {
+		// The nonce is JS-quoted via a helper because it may contain
+		// arbitrary bytes; we assemble it as a JS string literal.
+		sb = append(sb, "window._wails.cefNonce="...)
+		sb = appendJSQuoted(sb, nonce)
+		sb = append(sb, ';')
+	} else {
+		sb = append(sb, "window._wails.cefNonce='';"...)
+	}
+	return string(sb)
 }
 
 // jsonMarshal wraps encoding/json.Marshal. The runtime expects plain
