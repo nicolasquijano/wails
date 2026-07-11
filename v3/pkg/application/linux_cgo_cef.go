@@ -15,6 +15,7 @@ package application
 #include <gdk/x11/gdkx11surface.h>
 #include <gio/gio.h>
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
 
 // Trivial callback used to satisfy g_application's "activate" signal.
 static void cef_activate_cb(GApplication *app, gpointer data) {
@@ -263,7 +264,268 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 	// pump picks it up on the next tick and issues the initial resize.
 	cef_view_list_add(widget, xid);
 }
-*/
+
+// ── X11 helpers for window management ─────────────────────────────
+// These are used in place of gtk_window_move (removed in GTK4) and for
+// window state operations that GTK4 doesn't expose directly.
+
+static void window_move_x11(GtkWindow *window, int x, int y) {
+	GtkNative *native = gtk_widget_get_native(GTK_WIDGET(window));
+	if (native == NULL) return;
+
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (surface == NULL) return;
+
+	Display *xdisplay = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+	Window xwindow = gdk_x11_surface_get_xid(GDK_X11_SURFACE(surface));
+	XMoveWindow(xdisplay, xwindow, x, y);
+	XFlush(xdisplay);
+}
+
+static void window_get_position_x11(GtkWindow *window, int *x, int *y) {
+	*x = 0; *y = 0;
+	GtkNative *native = gtk_widget_get_native(GTK_WIDGET(window));
+	if (native == NULL) return;
+
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (surface == NULL) return;
+
+	Display *xdisplay = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+	Window xwindow = gdk_x11_surface_get_xid(GDK_X11_SURFACE(surface));
+
+	Window child, root;
+	root = DefaultRootWindow(xdisplay);
+	int abs_x, abs_y;
+	if (XTranslateCoordinates(xdisplay, xwindow, root, 0, 0, &abs_x, &abs_y, &child)) {
+		*x = abs_x;
+		*y = abs_y;
+	}
+}
+
+static void window_set_always_on_top_x11(GtkWindow *window, int always_on_top) {
+	GtkNative *native = gtk_widget_get_native(GTK_WIDGET(window));
+	if (native == NULL) return;
+
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (surface == NULL) return;
+
+	Display *xdisplay = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+	Window xwindow = gdk_x11_surface_get_xid(GDK_X11_SURFACE(surface));
+
+	Atom wm_state = XInternAtom(xdisplay, "_NET_WM_STATE", False);
+	Atom above = XInternAtom(xdisplay, "_NET_WM_STATE_ABOVE", False);
+	Window root = DefaultRootWindow(xdisplay);
+	XEvent event;
+	memset(&event, 0, sizeof(event));
+	event.type = ClientMessage;
+	event.xclient.window = xwindow;
+	event.xclient.message_type = wm_state;
+	event.xclient.format = 32;
+	event.xclient.data.l[0] = always_on_top ? 1 : 0; // _NET_WM_STATE_ADD or _NET_WM_STATE_REMOVE
+	event.xclient.data.l[1] = (long)above;
+	event.xclient.data.l[2] = 0;
+	event.xclient.data.l[3] = 0;
+	event.xclient.data.l[4] = 0;
+
+	XSendEvent(xdisplay, root, False, SubstructureRedirectMask | SubstructureNotifyMask, &event);
+	XFlush(xdisplay);
+}
+
+static void window_set_max_size_x11(GtkWindow *window, int maxWidth, int maxHeight) {
+	if (maxWidth <= 0 && maxHeight <= 0) return;
+
+	GtkNative *native = gtk_widget_get_native(GTK_WIDGET(window));
+	if (native == NULL) return;
+
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (surface == NULL) return;
+
+	Display *xdisplay = gdk_x11_display_get_xdisplay(gdk_surface_get_display(surface));
+	Window xwindow = gdk_x11_surface_get_xid(GDK_X11_SURFACE(surface));
+
+	XSizeHints hints;
+	memset(&hints, 0, sizeof(hints));
+	hints.flags = PMaxSize;
+	if (maxWidth > 0) hints.max_width = maxWidth;
+	if (maxHeight > 0) hints.max_height = maxHeight;
+	XSetWMNormalHints(xdisplay, xwindow, &hints);
+	XFlush(xdisplay);
+}
+
+static gboolean window_is_minimised(GtkWindow *window) {
+	GtkNative *native = gtk_widget_get_native(GTK_WIDGET(window));
+	if (native == NULL) return FALSE;
+
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (surface == NULL) return FALSE;
+
+	GdkToplevelState state = gdk_toplevel_get_state(GDK_TOPLEVEL(surface));
+	return (state & GDK_TOPLEVEL_STATE_MINIMIZED) != 0;
+}
+
+// processWindowEvent is the same forwarder used by the WebKit backend's
+// cgo block; we redeclare it here because the WebKit block is excluded
+// from the CEF build tag. The implementation lives in application_linux_cef.go
+// (or a CEF-only sibling) and writes to windowEvents.
+extern void processWindowEvent(unsigned int windowID, unsigned int eventID);
+
+// cef_focus_enter_cb / cef_focus_leave_cb forward GTK4 focus events to
+// the same channel the WebKit backend uses. data is the wails
+// WebviewWindow id, captured by g_signal_connect_data above.
+//
+// The event IDs are the events.Linux.WindowFocusIn / WindowFocusOut
+// constants (1059 / 1060). Hardcoded here so the cgo preamble stays
+// free of dependency on the events package (Go constants are not
+// visible from C).
+static void cef_focus_enter_cb(GtkEventController *controller, gpointer data) {
+	(void) controller;
+	processWindowEvent(GPOINTER_TO_UINT(data), 1059);
+}
+
+static void cef_focus_leave_cb(GtkEventController *controller, gpointer data) {
+	(void) controller;
+	processWindowEvent(GPOINTER_TO_UINT(data), 1060);
+}
+
+// cef_install_focus_controller attaches a GtkEventControllerFocus to
+// the given GtkWindow and wires its enter/leave signals to
+// cef_focus_enter_cb / cef_focus_leave_cb, carrying windowId as the
+// user-data pointer. Keeps the gpointer cast purely in C so cgo's
+// stricter uintptr_t → gpointer rules don't bite us.
+static void cef_install_focus_controller(GtkWidget *window, gpointer window_id) {
+	GtkEventController *controller = gtk_event_controller_focus_new();
+	gtk_widget_add_controller(window, controller);
+	g_signal_connect_data(controller, "enter",
+		G_CALLBACK(cef_focus_enter_cb), window_id, NULL, 0);
+	g_signal_connect_data(controller, "leave",
+		G_CALLBACK(cef_focus_leave_cb), window_id, NULL, 0);
+}
+
+// -----------------------------------------------------------------------------
+// OSR (off-screen rendering) — C-side glue (Decision C16)
+// -----------------------------------------------------------------------------
+//
+// On Wayland sessions the XReparentWindow path is unavailable. We
+// fall back to CEF's windowless rendering mode: the browser paints
+// into a BGRA pixel buffer that we copy into a GtkDrawingArea inside
+// the host window. The C-side helpers below create the drawing
+// area, run the draw callback (which blits the buffer via Cairo),
+// and forward input events (mouse / keyboard / scroll) to CEF.
+//
+// The Go-side wrappers in cef_osr_handler.go / cef_osr_linux.go
+// handle the actual painting, buffer management, and event
+// translation. Here we just wire the GTK widget and the C→Go
+// callbacks.
+
+// osrResizeMsg is the C mirror of the Go-side osrResizeMsg struct.
+// Both must agree on the field layout because we marshal this over
+// g_idle_add_full from the C resize callback into the Go
+// osrOnResizeGo handler. Keep field order/names in sync.
+typedef struct {
+	uintptr_t w;
+	int       width;
+	int       height;
+} osrResizeMsg;
+
+// osrResizeRequestFunc — Go callback when a GtkDrawingArea gets
+// resized. We forward to the g_idle_add_full bridge so the CEF
+// host.GetBrowser().GetHost().WasResized() call happens on the
+// CEF UI thread, not the GTK thread. The data pointer is the
+// linuxWebviewWindow Go pointer.
+// osrOnResizeGo is defined in Go via //export; the prototype must
+// match cgo's generated GoInt (long long on 64-bit Linux) for the
+// int arguments.
+extern void osrOnResizeGo(void *windowPtr, int64_t width, int64_t height);
+
+static gboolean osr_on_resize_idle(gpointer data) {
+	osrResizeMsg *msg = (osrResizeMsg *)data;
+	osrOnResizeGo((void *)msg->w, msg->width, msg->height);
+	g_free(msg);
+	return G_SOURCE_REMOVE;
+}
+
+static void osr_on_resize_cb(GtkDrawingArea *area, gint width, gint height, gpointer user_data) {
+	(void) area;
+	osrResizeMsg *msg = g_new0(osrResizeMsg, 1);
+	msg->w = (uintptr_t)user_data;
+	msg->width = width;
+	msg->height = height;
+	g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, osr_on_resize_idle, msg, NULL);
+}
+
+// osrDrawFunc — the GTK draw callback. We blit the CEF BGRA buffer
+// into the cairo surface. CEF gives us BGRA top-down; Cairo expects
+// ARGB32 (which on little-endian == BGRA in memory) for
+// cairo_image_surface_create_for_data. The byte order matches so we
+// can pass the buffer straight through.
+//
+// The actual buffer copy happens in Go because Go holds the mutex
+// around the frame state.
+// osrDrawGo is defined in Go via //export; the prototype must
+// match cgo's generated GoInt for the int arguments.
+extern int osrDrawGo(void *windowPtr, cairo_surface_t *cr, int64_t width, int64_t height);
+
+static void osr_draw_cb(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
+	(void) area;
+	if (osrDrawGo((void *)user_data, cairo_get_target(cr), width, height) != 0) {
+		// No frame yet — fill with a neutral dark gray so the
+		// drawing area is visible while waiting for the first
+		// CEF paint.
+		cairo_set_source_rgb(cr, 0.12, 0.12, 0.14);
+		cairo_paint(cr);
+	}
+}
+
+// cef_create_osr_drawing_area creates a GtkDrawingArea inside the
+// GtkBox and wires its draw + size-allocate signals. windowPtr is
+// the Go linuxWebviewWindow pointer (passed as user_data). The
+// returned pointer is the GtkDrawingArea. The drawing area is
+// automatically shown when its parent box is realized.
+
+static void *cefCreateOSRDrawingArea(void *box, void *windowPtr) {
+	GtkWidget *da = gtk_drawing_area_new();
+	gtk_widget_set_hexpand(da, TRUE);
+	gtk_widget_set_vexpand(da, TRUE);
+	gtk_box_append((GtkBox *)box, da);
+
+	gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(da), osr_draw_cb, windowPtr, NULL);
+	g_signal_connect(da, "resize", G_CALLBACK(osr_on_resize_cb), windowPtr);
+	return (void *)da;
+}
+
+// cefQueueOSRRedraw — schedule a redraw of the OSR drawing area on
+// the main thread. Called from Go (cef_osr_linux.go::queueOSRRedraw)
+// after OnPaint delivers a new frame.
+
+static gboolean osr_queue_redraw_idle(gpointer data) {
+	gtk_widget_queue_draw((GtkWidget *)data);
+	return G_SOURCE_REMOVE;
+}
+
+static void cefQueueOSRRedraw(void *drawingArea) {
+	if (drawingArea == NULL) return;
+	g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, osr_queue_redraw_idle, drawingArea, NULL);
+}
+
+// cefResizeOSRView — signal CEF that the render target changed
+// size. Dispatches WasResized + Invalidate on the CEF UI thread.
+
+// The Go side calls these via //export, matching signatures.
+static gboolean osr_resize_view_idle(gpointer data) {
+	osrResizeMsg *msg = (osrResizeMsg *)data;
+	osrOnResizeGo((void *)msg->w, msg->width, msg->height);
+	g_free(msg);
+	return G_SOURCE_REMOVE;
+}
+
+static void cefResizeOSRView(uintptr_t windowPtr, int32_t width, int32_t height) {
+	osrResizeMsg *msg = g_new0(osrResizeMsg, 1);
+	msg->w = windowPtr;
+	msg->width = width;
+msg->height = height;
+ 	g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, osr_resize_view_idle, msg, NULL);
+}
+ */
 import "C"
 
 import (
@@ -332,22 +594,39 @@ func cefInit() error {
 		debugLog("[cefInit] unsetting WAYLAND_DISPLAY to honor GDK_BACKEND=x11")
 		_ = os.Unsetenv("WAYLAND_DISPLAY")
 	}
-	// Belt-and-braces: also restrict GDK to X11 via the runtime API.
-	// This must happen before any GTK display is opened.
-	C.gdk_set_allowed_backends(C.CString("x11"))
+	// Belt-and-braces: restrict GDK to a single backend via the
+	// runtime API. Must happen before any GTK display is opened.
+	//
+	// On X11 (legacy / pre-Phase-5) we lock to "x11" so CEF's
+	// XReparentWindow path keeps working. On Wayland we lock to
+	// "wayland" so GTK picks its native Wayland backend; locking to
+	// "x11" on a Wayland session would force GTK through XWayland
+	// and the CEF view would land in a separate X11 window detached
+	// from our GTK host (the bug the user hit).
+	if isOnWayland() {
+		C.gdk_set_allowed_backends(C.CString("wayland"))
+	} else {
+		C.gdk_set_allowed_backends(C.CString("x11"))
+	}
 
 	// Proactively initialise GTK before CEF does. CEF's library has
 	// GTK symbols inside it (it uses GTK for file dialogs etc.) and
 	// will likely call gtk_init() during cef_initialize. If we let
 	// CEF drive the first GTK init, it happens before we've had a
-	// chance to enforce X11 and we end up on a Wayland display.
+	// chance to enforce the backend and we end up on the wrong
+	// display server.
 	//
-	// Doing it ourselves first makes GTK honour GDK_BACKEND=x11 and
-	// opens an X11 default display that CEF can reuse via
-	// gdk_display_get_default().
+	// Doing it ourselves first makes GTK honour the backend we
+	// selected above (X11 on X11 sessions, Wayland on Wayland
+	// sessions) and opens the matching default display that CEF can
+	// reuse via gdk_display_get_default().
 	C.gtk_init()
 
-	// Sanity-check that we ended up on X11.
+	// Sanity-check that we ended up on the backend we selected.
+	// On Wayland sessions the display name is "wayland-N"; on X11
+	// it's ":N" (the DISPLAY env). Either way, the next phase
+	// (CEF browser creation) needs the display to match what CEF
+	// was told to use via --ozone-platform.
 	defaultDisplay := C.gdk_display_get_default()
 	if defaultDisplay != nil {
 		debugLog("[cefInit] post-init default display backend=%s", C.GoString(C.gdk_display_get_name(defaultDisplay)))
@@ -476,12 +755,29 @@ func appNew(name string) pointer {
 // cefShowWindow for that.
 //
 // windowId is the wails WebviewWindow ID (for window-map bookkeeping).
+// Focus events (WindowFocusIn/WindowFocusOut) are wired here via a
+// GtkEventControllerFocus installed in C (cef_install_focus_controller
+// below) — moving the controller setup into the C preamble keeps the
+// gpointer casts in C where they belong and avoids cgo type issues
+// around C.uintptr_t → C.gpointer.
 func cefCreateHostWindow(application pointer, windowId uint) (window, vbox pointer) {
 	window = pointer(C.gtk_application_window_new((*C.GtkApplication)(application)))
 	C.g_object_ref_sink(C.gpointer(window))
 
 	vbox = pointer(C.gtk_box_new(C.GTK_ORIENTATION_VERTICAL, 0))
 	C.gtk_window_set_child((*C.GtkWindow)(window), (*C.GtkWidget)(vbox))
+
+	// Wire focus-in / focus-out via the C helper. CEF embeds its
+	// view as an X11 child of this window; GTK's window-level focus
+	// change is the only signal we have for "user clicked the CEF
+	// window". The WebKit backend uses an identical controller (see
+	// linux_cgo.go: handleFocusEnter / handleFocusLeave). The
+	// uintptr_t → gpointer cast happens inside the C helper so we
+	// don't have to fight cgo's stricter conversion rules here.
+	// windowId is an opaque C-side identifier (not a Go pointer), so
+	// the unsafe.Pointer intermediate is safe and intentional.
+	C.cef_install_focus_controller((*C.GtkWidget)(window), C.gpointer(unsafe.Pointer(uintptr(windowId))))
+
 	return
 }
 
@@ -551,6 +847,267 @@ func cefDestroyWindow(window pointer) {
 	C.gtk_window_destroy((*C.GtkWindow)(window))
 }
 
+// ── Window state operations ───────────────────────────────────────
+
+func cefMaximiseWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_maximize((*C.GtkWindow)(window))
+}
+
+func cefUnmaximiseWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_unmaximize((*C.GtkWindow)(window))
+}
+
+func cefMinimiseWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_minimize((*C.GtkWindow)(window))
+}
+
+func cefUnminimiseWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_unminimize((*C.GtkWindow)(window))
+}
+
+func cefFullscreenWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_fullscreen((*C.GtkWindow)(window))
+}
+
+func cefUnfullscreenWindow(window pointer) {
+	if window == nil {
+		return
+	}
+	C.gtk_window_unfullscreen((*C.GtkWindow)(window))
+}
+
+func cefIsFullscreen(window pointer) bool {
+	if window == nil {
+		return false
+	}
+	return C.gtk_window_is_fullscreen((*C.GtkWindow)(window)) != 0
+}
+
+func cefIsMaximised(window pointer) bool {
+	if window == nil {
+		return false
+	}
+	return C.gtk_window_is_maximized((*C.GtkWindow)(window)) != 0 && !cefIsFullscreen(window)
+}
+
+func cefIsMinimised(window pointer) bool {
+	if window == nil {
+		return false
+	}
+	return C.window_is_minimised((*C.GtkWindow)(window)) != 0
+}
+
+func cefIsFocused(window pointer) bool {
+	if window == nil {
+		return false
+	}
+	return C.gtk_window_is_active((*C.GtkWindow)(window)) != 0
+}
+
+func cefIsVisible(window pointer) bool {
+	if window == nil {
+		return false
+	}
+	return C.gtk_widget_is_visible((*C.GtkWidget)(window)) != 0
+}
+
+func cefMoveWindow(window pointer, x, y int) {
+	if window == nil {
+		return
+	}
+	// Wayland compositors reject explicit window placement; calling
+	// XMoveWindow on a Wayland session either silently no-ops or
+	// crashes depending on the compositor. Short-circuit before the
+	// Xlib call. See Decision C15.
+	if isOnWayland() {
+		debugLog("[cefMoveWindow] ignoring move to (%d, %d): Wayland compositor owns placement", x, y)
+		return
+	}
+	C.window_move_x11((*C.GtkWindow)(window), C.int(x), C.int(y))
+}
+
+func cefGetWindowPosition(window pointer) (int, int) {
+	if window == nil {
+		return 0, 0
+	}
+	var x, y C.int
+	C.window_get_position_x11((*C.GtkWindow)(window), &x, &y)
+	return int(x), int(y)
+}
+
+func cefSetResizable(window pointer, resizable bool) {
+	if window == nil {
+		return
+	}
+	b := C.gboolean(0)
+	if resizable {
+		b = C.gboolean(1)
+	}
+	C.gtk_window_set_resizable((*C.GtkWindow)(window), b)
+}
+
+func cefSetDecorated(window pointer, decorated bool) {
+	if window == nil {
+		return
+	}
+	b := C.gboolean(0)
+	if decorated {
+		b = C.gboolean(1)
+	}
+	C.gtk_window_set_decorated((*C.GtkWindow)(window), b)
+}
+
+func cefSetAlwaysOnTop(window pointer, alwaysOnTop bool) {
+	if window == nil {
+		return
+	}
+	v := C.int(0)
+	if alwaysOnTop {
+		v = C.int(1)
+	}
+	C.window_set_always_on_top_x11((*C.GtkWindow)(window), v)
+}
+
+func cefSetSizeRequest(window pointer, width, height int) {
+	if window == nil {
+		return
+	}
+	if width > 0 && height > 0 {
+		C.gtk_widget_set_size_request((*C.GtkWidget)(window), C.int(width), C.int(height))
+	}
+}
+
+func cefGetDefaultSize(window pointer) (int, int) {
+	if window == nil {
+		return 0, 0
+	}
+	var w, h C.int
+	C.gtk_window_get_default_size((*C.GtkWindow)(window), &w, &h)
+	if w <= 0 || h <= 0 {
+		w = C.int(C.gtk_widget_get_width((*C.GtkWidget)(window)))
+		h = C.int(C.gtk_widget_get_height((*C.GtkWidget)(window)))
+	}
+	return int(w), int(h)
+}
+
+func cefSetMaxSize(window pointer, maxWidth, maxHeight int) {
+	if window == nil {
+		return
+	}
+	C.window_set_max_size_x11((*C.GtkWindow)(window), C.int(maxWidth), C.int(maxHeight))
+}
+
+// ── Monitor query ─────────────────────────────────────────────────
+
+func cefGetCurrentMonitorGeometry(window pointer) (int, int, int, int) {
+	if window == nil {
+		return 0, 0, 1920, 1080
+	}
+	surface := C.gtk_native_get_surface(C.gtk_widget_get_native((*C.GtkWidget)(window)))
+	if surface == nil {
+		return 0, 0, 1920, 1080
+	}
+	monitor := C.gdk_display_get_monitor_at_surface(C.gdk_surface_get_display(surface), surface)
+	if monitor == nil {
+		return 0, 0, 1920, 1080
+	}
+	var geo C.GdkRectangle
+	C.gdk_monitor_get_geometry(monitor, &geo)
+	return int(geo.x), int(geo.y), int(geo.width), int(geo.height)
+}
+
+func cefWidgetWidth(window pointer) int {
+	if window == nil {
+		return 0
+	}
+	return int(C.gtk_widget_get_width((*C.GtkWidget)(window)))
+}
+
+func cefWidgetHeight(window pointer) int {
+	if window == nil {
+		return 0
+	}
+	return int(C.gtk_widget_get_height((*C.GtkWidget)(window)))
+}
+
+// cefCreateBrowserDetached creates a CEF browser that lives in its
+// own top-level Wayland window. Used on Wayland sessions where we
+// can't embed into the GTK4 host (the Wayland protocol has no
+// foreign-window equivalent of XReparentWindow). The GTK4 window
+// remains as a placeholder host — apps should not assume its size
+// reflects the CEF view. Decision C15.
+//
+// Phase 5 will replace this with an xdg-foreign import path that
+// asks the compositor to embed CEF's Wayland wl_surface into our
+// GTK4 surface via the gtk_shell1 protocol.
+func cefCreateBrowserDetached(gtkWindow unsafe.Pointer, url string, width, height int, w *linuxWebviewWindow) cef.Browser {
+	if url == "" {
+		url = "about:blank"
+	}
+
+	stub := &cefClientStub{w: w}
+	rawClient := cef.NewClient(stub)
+
+	// Ensure the GTK window is realized — useful for tests / dev that
+	// inspect the host. CEF doesn't need it on Wayland but realizing
+	// it now gives the user a visible GTK4 window they can interact
+	// with even before CEF is up.
+	if !bool(C.gtk_widget_get_realized((*C.GtkWidget)(gtkWindow)) != 0) {
+		C.gtk_widget_realize((*C.GtkWidget)(gtkWindow))
+	}
+
+	wi := cef.NewWindowInfo()
+	wi.WindowlessRenderingEnabled = 0
+	wi.SharedTextureEnabled = 0
+	wi.ExternalBeginFrameEnabled = 0
+	// On Wayland the Chrome runtime is required (the Alloy runtime
+	// doesn't have a Wayland surface implementation). The runtime
+	// style is selected globally by the cefWailsApp command-line
+	// processing, so we don't set it here.
+	if width <= 0 {
+		width = 800
+	}
+	if height <= 0 {
+		height = 600
+	}
+	wi.Bounds.X = 0
+	wi.Bounds.Y = 0
+	wi.Bounds.Width = int32(width)
+	wi.Bounds.Height = int32(height)
+
+	settings := cef.NewBrowserSettings()
+	debugLog("[cefCreateBrowserDetached] url=%q", url)
+	browser := cef.BrowserHostCreateBrowserSync(&wi, rawClient, url, &settings, nil, nil)
+	if browser == nil {
+		debugLog("[cefCreateBrowserDetached] returned browser=false")
+		return nil
+	}
+	debugLog("[cefCreateBrowserDetached] returned browser=true (CEF owns its own Wayland window)")
+
+	// Register the browser in the global browser→window map so the
+	// V8 extension handler can find the owning window when JS calls
+	// wails_cefResolveDrop or wails_invokeAsync.
+	if w != nil {
+		registerCefBrowser(browser.GetIdentifier(), w)
+	}
+	return browser
+}
+
 // cefCreateBrowserInWidget creates a CEF browser, then reparents its
 // X11 view into the GtkBox so the browser fills the box's content
 // area.
@@ -570,7 +1127,7 @@ func cefDestroyWindow(window pointer) {
 // GdkSurface → XID, so it correctly identifies the GtkWindow as the
 // X11 parent of the CEF view even when we hand it a GtkBox (which
 // has no native surface of its own).
-func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string, width, height int) cef.Browser {
+func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string, width, height int, w *linuxWebviewWindow) cef.Browser {
 	if gtkWindow == nil {
 		debugLog("[cefCreateBrowserInWidget] gtkWindow is nil")
 		return nil
@@ -579,7 +1136,7 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 		url = "about:blank"
 	}
 
-	stub := &cefClientStub{}
+	stub := &cefClientStub{w: w}
 	rawClient := cef.NewClient(stub)
 
 	// Realize the GtkWindow so it has a GdkSurface with a valid X11
@@ -587,6 +1144,15 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 	// surfaces in GTK4 — only the top-level GtkWindow does.
 	if !bool(C.gtk_widget_get_realized((*C.GtkWidget)(gtkWindow)) != 0) {
 		C.gtk_widget_realize((*C.GtkWidget)(gtkWindow))
+	}
+
+	// On Wayland, CEF creates its own surface via Chrome runtime +
+	// Ozone/Wayland. The GTK4 host has no X11 handle so we can't
+	// reparent anything into it. CEF runs as its own top-level
+	// window — see Decision C15. Phase 5 will replace this with an
+	// xdg-foreign import path.
+	if isOnWayland() {
+		return cefCreateBrowserDetached(gtkWindow, url, width, height, w)
 	}
 
 	// Walk GtkWindow -> GtkNative -> GdkSurface -> X11 handle.
@@ -638,6 +1204,13 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 		return nil
 	}
 
+	// Register the browser in the global browser→window map so the
+	// V8 extension handler can find the owning window when JS calls
+	// wails_cefResolveDrop during a drop event.
+	if w != nil {
+		registerCefBrowser(browser.GetIdentifier(), w)
+	}
+
 	// Reparent CEF's view window into the GtkBox. cef_attach_to_gtk_widget
 	// walks widget -> GtkNative -> surface -> XID, so even when given a
 	// GtkBox (no native surface) it correctly resolves the parent XID to
@@ -659,4 +1232,69 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 	}
 	cefAttachToGTKWidget(target, view)
 	return browser
+}
+
+// -----------------------------------------------------------------------------
+// OSR (off-screen rendering) Go-side callbacks
+// -----------------------------------------------------------------------------
+//
+// Called from the C preamble on the main thread (via g_idle_add_full).
+// Do NOT call CefBrowserHost / Browser methods that require the CEF
+// UI thread directly — instead bounce through InvokeAsync so they
+// run on the CEF UI thread (which is the main thread in single-process
+// mode but the contract is the same either way).
+
+// osrOnResizeGo is called by g_idle_add_full when the GtkDrawingArea
+// is resized. The current CEF backend uses X11 reparenting, not OSR,
+// so this callback is unreachable. It's wired and exported so the
+// C-side OSR glue in the preamble compiles and links; the real
+// Phase 6 OSR work (see CEF_IMPLEMENTATION.md Phase 6) will
+// implement the CefBrowserHost::WasResized + Invalidate flow here.
+//
+//export osrOnResizeGo
+func osrOnResizeGo(windowPtr unsafe.Pointer, width, height C.int64_t) {
+	// Phase 6 OSR: forward to w.browser.GetHost().WasResized() etc.
+	_ = windowPtr
+	_ = width
+	_ = height
+}
+
+// osrDrawGo is the GTK draw callback for the OSR drawing area.
+// Unreachable today (X11 reparenting path), wired only to keep the
+// C-side OSR glue linking. Phase 6 OSR will blit the CEF BGRA
+// buffer onto the cairo surface here.
+//
+//export osrDrawGo
+func osrDrawGo(windowPtr unsafe.Pointer, cr *C.cairo_surface_t, width, height C.int64_t) C.int {
+	// Phase 6 OSR: blit w.osrFrame.buffer onto cr via a temp
+	// cairo_image_surface. Caller paints a placeholder gray when
+	// we return 0, which is fine for the unreachable path.
+	_ = windowPtr
+	_ = cr
+	_ = width
+	_ = height
+	return C.int(0)
+}
+
+// -----------------------------------------------------------------------------
+// OSR C-callable helpers exported to the C preamble.
+// -----------------------------------------------------------------------------
+
+// cefCreateOSRDrawingArea is the Go implementation of the C forwarder
+// of the same name (defined in the preamble above). Returns the
+// GtkDrawingArea pointer as a Go unsafe.Pointer so the caller can
+// store it on linuxWebviewWindow.drawingArea.
+func cefCreateOSRDrawingArea(box, windowPtr unsafe.Pointer) unsafe.Pointer {
+	return C.cefCreateOSRDrawingArea(box, windowPtr)
+}
+
+// cefQueueOSRRedraw is the Go implementation of the C forwarder.
+// Returns void; the C side already calls g_idle_add_full.
+func cefQueueOSRRedraw(drawingArea unsafe.Pointer) {
+	C.cefQueueOSRRedraw(drawingArea)
+}
+
+// cefResizeOSRView is the Go implementation of the C forwarder.
+func cefResizeOSRView(windowPtr uintptr, width, height C.int32_t) {
+	C.cefResizeOSRView(C.uintptr_t(windowPtr), width, height)
 }

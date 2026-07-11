@@ -5,10 +5,29 @@ package application
 import (
 	"fmt"
 	"os"
+	"sync"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
 )
+
+// osrFrame is the Phase 6 OSR frame buffer. The X11 reparenting path
+// never touches it; it's defined here so the struct layout is stable
+// across the CEF backend regardless of which render path is in use.
+type osrFrame struct {
+	width, height int
+	painted       bool
+	buffer        []byte
+}
+
+// osrResizeMsg mirrors the C-side osrResizeMsg struct in
+// linux_cgo_cef.go. Defined here so the linuxWebviewWindow field
+// `osrResizeCh chan osrResizeMsg` compiles. Phase 6 wires the channel
+// to the g_idle_add_full bridge.
+type osrResizeMsg struct {
+	w             uintptr
+	width, height int
+}
 
 // linuxWebviewWindow is the CEF-flavoured webview window for Phase 1.
 //
@@ -45,6 +64,24 @@ type linuxWebviewWindow struct {
 	// CEF-specific fields
 	browser cef.Browser // CEF browser handle; nil until first create
 
+	// dragSlot holds the CEF DragData captured by the most recent
+	// OnDragEnter call. The JS drop-event handler reads it via the
+	// wails_cefResolveDrop native function (see cef_drag_handler.go
+	// and cef_js_shim.js).
+	dragSlot dragDataSlot
+
+	// OSR (off-screen rendering) state. Populated only on Wayland
+	// sessions where CEF can't embed inside the GTK4 window via
+	// XReparentWindow. The drawingArea is a GtkDrawingArea that
+	// blits osrFrame.buffer onto the GTK window on every paint cycle.
+	// Phase 6 OSR work populates these; until then they sit at zero
+	// values so the struct layout is stable.
+	osrFrameMu    sync.RWMutex
+	osrFrame      osrFrame
+	drawingArea   unsafe.Pointer
+	osrResizeCh   chan osrResizeMsg
+	osrResizeOnce sync.Once
+
 	moveDebouncer     func(func())
 	resizeDebouncer   func(func())
 	ignoreMouseEvents bool
@@ -71,7 +108,11 @@ func (w *linuxWebviewWindow) setTitle(title string) {
 // destroyed, otherwise CEF will try to paint into a destroyed X11 window.
 func (w *linuxWebviewWindow) destroy() {
 	if w.browser != nil {
-		// Phase 2: call browser.Close() and wait for OnBeforeClose.
+		// Remove the browser→window mapping before closing the
+		// browser; once CEF's BrowserHost is destroyed any pending
+		// JS drop handler that calls wails_cefResolveDrop would
+		// otherwise race with the CEF teardown.
+		unregisterCefBrowser(w.browser.GetIdentifier())
 		w.browser = nil
 	}
 	cefDestroyWindow(w.window)
@@ -142,6 +183,7 @@ func (w *linuxWebviewWindow) run() {
 		unsafe.Pointer(w.vbox),
 		w.parent.options.URL,
 		ww, wh,
+		w,
 	)
 	debugLog("[linuxWebviewWindow.run] cefCreateBrowserInWidget returned browser=%v", w.browser != nil)
 
@@ -228,23 +270,53 @@ func (w *linuxWebviewWindow) setMinimiseButtonEnabled(enabled bool)     {}
 func (w *linuxWebviewWindow) setMaximiseButtonEnabled(enabled bool)      {}
 func (w *linuxWebviewWindow) disableSizeConstraints()                   {}
 func (w *linuxWebviewWindow) enableSizeConstraints()                    {}
-func (w *linuxWebviewWindow) unminimise()                                {}
 func (w *linuxWebviewWindow) on(eventID uint)                            {}
-func (w *linuxWebviewWindow) zoom()                                      {}
-func (w *linuxWebviewWindow) windowZoom()                                {}
-func (w *linuxWebviewWindow) centre()                                    {}
-func (w *linuxWebviewWindow) center()                                    {}
-func (w *linuxWebviewWindow) restore()                                   {}
-func (w *linuxWebviewWindow) setMinMaxSize(minWidth, minHeight, maxWidth, maxHeight int) {
+func (w *linuxWebviewWindow) zoom() {
+	if w.isMaximised() {
+		w.unmaximise()
+	} else {
+		w.maximise()
+	}
 }
-func (w *linuxWebviewWindow) setMinSize(width, height int)             {}
+func (w *linuxWebviewWindow) setMinMaxSize(minWidth, minHeight, maxWidth, maxHeight int) {
+	if minWidth > 0 && minHeight > 0 {
+		cefSetSizeRequest(w.window, minWidth, minHeight)
+	}
+	if maxWidth > 0 || maxHeight > 0 {
+		cefSetMaxSize(w.window, maxWidth, maxHeight)
+	}
+}
+func (w *linuxWebviewWindow) setMinSize(width, height int) {
+	if width > 0 && height > 0 {
+		cefSetSizeRequest(w.window, width, height)
+	}
+}
+func (w *linuxWebviewWindow) setMaxSize(width, height int) {
+	if width > 0 || height > 0 {
+		cefSetMaxSize(w.window, width, height)
+	}
+}
+func (w *linuxWebviewWindow) bounds() Rect {
+	cw, ch := cefGetDefaultSize(w.window)
+	cx, cy := cefGetWindowPosition(w.window)
+	return Rect{X: cx, Y: cy, Width: cw, Height: ch}
+}
+func (w *linuxWebviewWindow) print2() error { return w.print() }
+func (w *linuxWebviewWindow) width() int {
+	if w.window == nil {
+		return w.lastWidth
+	}
+	return cefWidgetWidth(w.window)
+}
+func (w *linuxWebviewWindow) height() int {
+	if w.window == nil {
+		return w.lastHeight
+	}
+	return cefWidgetHeight(w.window)
+}
 func (w *linuxWebviewWindow) getBorderSizes() *LRTB                     { return &LRTB{} }
-func (w *linuxWebviewWindow) setMaxSize(width, height int)             {}
-func (w *linuxWebviewWindow) setRelativePosition(x int, y int)         {}
-func (w *linuxWebviewWindow) width() int                                { return w.lastWidth }
-func (w *linuxWebviewWindow) height() int                               { return w.lastHeight }
+func (w *linuxWebviewWindow) setRelativePosition(x int, y int)         { w.move(x, y) }
 func (w *linuxWebviewWindow) applyScreenPlacement()                     {}
-func (w *linuxWebviewWindow) bounds() Rect                              { return Rect{} }
 func (w *linuxWebviewWindow) setMenu(menu *Menu)                        {}
 func (w *linuxWebviewWindow) nativeWindow() unsafe.Pointer              { return unsafe.Pointer(w.window) }
 func (w *linuxWebviewWindow) startDrag() error                         { return nil }
@@ -292,14 +364,14 @@ func (w *linuxWebviewWindow) setURL(url string) {
 	frame.LoadURL(url)
 }
 
-// setFrameless is a Phase 1 stub. Real implementation in Phase 4.
+// setFrameless sets or removes window decorations.
 func (w *linuxWebviewWindow) setFrameless(frameless bool) {
-	_ = frameless
+	cefSetDecorated(w.window, !frameless)
 }
 
-// setResizable is a Phase 1 stub. Real implementation in Phase 4.
+// setResizable sets whether the window can be resized.
 func (w *linuxWebviewWindow) setResizable(resizable bool) {
-	_ = resizable
+	cefSetResizable(w.window, resizable)
 }
 
 // setBackgroundColour is a Phase 1 stub. Real implementation in Phase 4.
@@ -320,7 +392,7 @@ func (w *linuxWebviewWindow) setDefaultSize(width, height int) {
 }
 
 func (w *linuxWebviewWindow) setAlwaysOnTop(alwaysOnTop bool) {
-	_ = alwaysOnTop
+	cefSetAlwaysOnTop(w.window, alwaysOnTop)
 }
 
 // cut / copy / paste / selectAll / undo / redo are Phase 1 stubs that
@@ -337,19 +409,21 @@ func (w *linuxWebviewWindow) delete()    { w.execJS("document.execCommand('delet
 // flash is a Phase 1 stub; real impl in Phase 4 uses gtk_window_set_urgency_hint.
 func (w *linuxWebviewWindow) flash(_ bool) {}
 
-// getCurrentMonitorGeometry is a Phase 1 stub.
-func (w *linuxWebviewWindow) getCurrentMonitorGeometry() (int, int, int, int) {
-	return 0, 0, 1920, 1080
-}
-
 // getScreen is a Phase 1 stub.
 func (w *linuxWebviewWindow) getScreen() (*Screen, error) {
 	return &Screen{}, nil
 }
 
-// size is a Phase 1 stub.
+// size returns the window's current size.
 func (w *linuxWebviewWindow) size() (int, int) {
-	return w.lastWidth, w.lastHeight
+	if w.window == nil {
+		return w.lastWidth, w.lastHeight
+	}
+	cw, ch := cefWidgetWidth(w.window), cefWidgetHeight(w.window)
+	if cw > 0 && ch > 0 {
+		w.lastWidth, w.lastHeight = cw, ch
+	}
+	return cw, ch
 }
 
 // reload, zoomReset, zoomIn, zoomOut, getZoom, setZoom, zoom, setHTML are
@@ -380,12 +454,12 @@ func (w *linuxWebviewWindow) setHTML(html string) {
 	frame.LoadURL("data:text/html;charset=utf-8," + html)
 }
 
-// isFullscreen / isMaximised / isMinimised / isVisible / isFocused are Phase 1 stubs.
-func (w *linuxWebviewWindow) isFullscreen() bool { return false }
-func (w *linuxWebviewWindow) isMaximised() bool  { return false }
-func (w *linuxWebviewWindow) isMinimised() bool  { return false }
-func (w *linuxWebviewWindow) isFocused() bool    { return false }
-func (w *linuxWebviewWindow) isVisible() bool    { return true }
+// isFullscreen / isMaximised / isMinimised / isVisible / isFocused
+func (w *linuxWebviewWindow) isFullscreen() bool { return cefIsFullscreen(w.window) }
+func (w *linuxWebviewWindow) isMaximised() bool  { return cefIsMaximised(w.window) }
+func (w *linuxWebviewWindow) isMinimised() bool  { return cefIsMinimised(w.window) }
+func (w *linuxWebviewWindow) isFocused() bool    { return cefIsFocused(w.window) }
+func (w *linuxWebviewWindow) isVisible() bool    { return cefIsVisible(w.window) }
 
 // close is a Phase 1 stub. Real implementation in Phase 4 uses
 // CefBrowser::CloseBrowser + gtk_window_close.
@@ -400,22 +474,46 @@ func (w *linuxWebviewWindow) setEnabled(_ bool) {}
 func (w *linuxWebviewWindow) enableDND()        {}
 func (w *linuxWebviewWindow) disableDND()       {}
 
-// position / setBounds / setPosition / centerOnScreen are Phase 1 stubs.
-func (w *linuxWebviewWindow) position() (int, int)                  { return 0, 0 }
-func (w *linuxWebviewWindow) relativePosition() (int, int)          { return 0, 0 }
-func (w *linuxWebviewWindow) setBounds(_ Rect)                      {}
-func (w *linuxWebviewWindow) setPosition(x, y int)                 { _ = x; _ = y }
-func (w *linuxWebviewWindow) centerOnScreen(_ *Screen)             {}
-func (w *linuxWebviewWindow) physicalBounds() Rect                  { return Rect{} }
-func (w *linuxWebviewWindow) setPhysicalBounds(_ Rect)             {}
+// position / setBounds / setPosition / centerOnScreen / centre / center
+func (w *linuxWebviewWindow) position() (int, int)                  { return cefGetWindowPosition(w.window) }
+func (w *linuxWebviewWindow) relativePosition() (int, int)          { return w.position() }
+func (w *linuxWebviewWindow) setBounds(r Rect)                      { w.move(r.X, r.Y); w.setSize(r.Width, r.Height) }
+func (w *linuxWebviewWindow) setPosition(x, y int)                 { w.move(x, y) }
+func (w *linuxWebviewWindow) centerOnScreen(_ *Screen)             { w.center() }
+func (w *linuxWebviewWindow) physicalBounds() Rect                  { return w.bounds() }
+func (w *linuxWebviewWindow) setPhysicalBounds(r Rect)             { w.setBounds(r) }
+func (w *linuxWebviewWindow) centre()                               { w.center() }
+func (w *linuxWebviewWindow) center() {
+	mx, my, mw, mh := cefGetCurrentMonitorGeometry(w.window)
+	cw, ch := cefGetDefaultSize(w.window)
+	cefMoveWindow(w.window, mx+(mw-cw)/2, my+(mh-ch)/2)
+}
+func (w *linuxWebviewWindow) getCurrentMonitorGeometry() (int, int, int, int) {
+	return cefGetCurrentMonitorGeometry(w.window)
+}
 
-func (w *linuxWebviewWindow) maximise()     {}
-func (w *linuxWebviewWindow) unmaximise()   {}
-func (w *linuxWebviewWindow) minimise()     {}
-func (w *linuxWebviewWindow) unminimise2()  {}
-func (w *linuxWebviewWindow) fullscreen()   {}
-func (w *linuxWebviewWindow) unfullscreen() {}
-func (w *linuxWebviewWindow) move(x, y int) { _ = x; _ = y }
-// centre() is already declared as a no-op stub above (Phase 1).
-func (w *linuxWebviewWindow) present()      {}
-func (w *linuxWebviewWindow) print2() error { return w.print() }
+func (w *linuxWebviewWindow) maximise()   { cefMaximiseWindow(w.window) }
+func (w *linuxWebviewWindow) unmaximise() { cefUnmaximiseWindow(w.window) }
+func (w *linuxWebviewWindow) minimise()   { cefMinimiseWindow(w.window) }
+func (w *linuxWebviewWindow) unminimise()  { cefUnminimiseWindow(w.window) }
+func (w *linuxWebviewWindow) unminimise2() { cefUnminimiseWindow(w.window) }
+func (w *linuxWebviewWindow) fullscreen()  { cefFullscreenWindow(w.window) }
+func (w *linuxWebviewWindow) unfullscreen() {
+	cefUnfullscreenWindow(w.window)
+	cefUnmaximiseWindow(w.window)
+}
+func (w *linuxWebviewWindow) move(x, y int) {
+	// On Wayland, the compositor owns window placement and explicit
+	// SetPosition / move() calls are rejected (or silently ignored,
+	// depending on the compositor). The Wayland protocol has no
+	// equivalent of X11's XMoveWindow; the only valid position
+	// requests are interactive (drag) and shell-side decoration
+	// defaults. Decision C15 records this no-op.
+	if isOnWayland() {
+		debugLog("[linuxWebviewWindow.move] ignoring move to (%d, %d): Wayland compositor owns placement", x, y)
+		return
+	}
+	cefMoveWindow(w.window, x, y)
+}
+func (w *linuxWebviewWindow) present()      { cefPresentWindow(w.window) }
+func (w *linuxWebviewWindow) restore()      { cefUnminimiseWindow(w.window); cefUnmaximiseWindow(w.window); cefUnfullscreenWindow(w.window) }
