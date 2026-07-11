@@ -116,6 +116,7 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 
 - [x] V8 handler `wails_invoke` — synchronous Go ← JS calls via `HandleRuntimeCallWithIDs()`
 - [x] HTTP POST body + header forwarding from CEF → assetserver (enables the default fetch transport)
+- [x] Verified: bound methods work via HTTP POST (`Greeter.Hello("CEF")` → `"Hello CEF from Go!"`)
 - [x] Verified: System.Environment, Window.SetTitle via HTTP fetch work end-to-end
 - [ ] V8 extension context isolation (`window.wails.invoke` not accessible from CDP -- low priority, HTTP path works)
 - [ ] Async callback resolution (`wails_callback` — Go → JS push notifications, Promise resolve)
@@ -184,3 +185,5 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 | 2026-07-10 | 1cd26cde2 | fix(v3/cef): defer resize via idle callback to catch post-layout size |
 | 2026-07-10 | 06f969936 | fix(v3/cef): track CEF views via linked list and resize on idle pump |
 | 2026-07-10 | 30ccd0981 | feat(v3/cef): forward POST body and headers from CEF to assetserver |
+| 2026-07-10 | c6c5f3a1b | docs: update cef tracker - IPC verified working via HTTP fetch |
+| 2026-07-10 | (uncommitted) | Verified: bound method calls work (Greeter.Hello, Greeter.Add) |
