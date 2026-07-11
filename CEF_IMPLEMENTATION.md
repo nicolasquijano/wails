@@ -64,6 +64,17 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - Alloy is the classic CEF embedding API that supports `XReparentWindow` + `CefBrowserHost::GetWindowHandle`
 - Chrome runtime may work better with Ozone/Wayland in the future, but currently breaks reparenting
 
+### Decision C7: Route HTTP POST body through CEF→Go (2026-07-10)
+
+**Context**: The JS runtime uses HTTP fetch POST to `/wails/runtime` by default. The CEF resource handler (`cefResourceRequestHandler`) was creating a Go `http.Request` with `nil` body, discarding the request payload.
+
+**Decision**: Read CEF `Request.GetPostData()` in `Open()` and forward the bytes + selected headers (`x-wails-*`, `content-type`) as the Go request body/headers.
+
+**Rationale**:
+- Avoids changing the JS runtime transport or the CEF shim
+- The default HTTP fetch path now works end-to-end: `JS fetch → CEF Open() → serveFromAssets() → assetserver → HTTPTransport middleware → HandleRuntimeCallWithIDs()`
+- POST body is read synchronously (fine for runtime calls — typically <1KB)
+
 ### Decision C6: Custom scheme `wails` with CORS (2026-07-07)
 
 **Context**: The custom `wails://` scheme serves app assets. Initially used `LOCAL | STANDARD | CORS_ENABLED | FETCH_ENABLED | SECURE`.
@@ -101,9 +112,12 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - [x] JS `setInterval`/`setTimeout` work
 - [x] CSS loading (Tailwind classes render)
 
-### Phase 3: IPC & Runtime (📋 PENDING)
+### Phase 3: IPC & Runtime (🔄 IN PROGRESS)
 
-- [ ] Go ↔ JS IPC bridge (call Go methods from JS, dispatch events)
+- [x] V8 handler `wails_invoke` — synchronous Go ← JS calls via `HandleRuntimeCallWithIDs()`
+- [x] HTTP POST body + header forwarding from CEF → assetserver (enables the default fetch transport)
+- [ ] Async callback resolution (`wails_callback` — Go → JS push notifications, Promise resolve)
+- [ ] Event emission (`wails_emit` — Go → JS event dispatching)
 - [ ] Window management from JS (resize, close, minimize, maximize)
 - [ ] Application lifecycle hooks
 - [ ] Drag & drop file events
@@ -167,3 +181,4 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 | 2026-07-10 | 894ec0174 | fix(v3/cef): connect resize signal to GtkWindow, not GtkBox |
 | 2026-07-10 | 1cd26cde2 | fix(v3/cef): defer resize via idle callback to catch post-layout size |
 | 2026-07-10 | 06f969936 | fix(v3/cef): track CEF views via linked list and resize on idle pump |
+| 2026-07-10 | 30ccd0981 | feat(v3/cef): forward POST body and headers from CEF to assetserver |
