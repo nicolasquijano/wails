@@ -116,6 +116,8 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 
 - [x] V8 handler `wails_invoke` — synchronous Go ← JS calls via `HandleRuntimeCallWithIDs()`
 - [x] HTTP POST body + header forwarding from CEF → assetserver (enables the default fetch transport)
+- [x] Verified: System.Environment, Window.SetTitle via HTTP fetch work end-to-end
+- [ ] V8 extension context isolation (`window.wails.invoke` not accessible from CDP -- low priority, HTTP path works)
 - [ ] Async callback resolution (`wails_callback` — Go → JS push notifications, Promise resolve)
 - [ ] Event emission (`wails_emit` — Go → JS event dispatching)
 - [ ] Window management from JS (resize, close, minimize, maximize)
