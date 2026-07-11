@@ -31,7 +31,7 @@ func cefResourcesDir() string {
 
 // cefWailsApp implements cef.App. CEF calls OnBeforeCommandLineProcessing
 // once at startup, before parsing argv. We use it to inject the
-// Chromium switches that make CEF usable on a forced-X11 Wayland session.
+// Chromium switches that make CEF usable on the current display server.
 //
 // Methods we don't need (GetBrowserProcessHandler, GetRenderProcessHandler,
 // GetResourceBundleHandler) all return nil; CEF then falls back to the
@@ -42,36 +42,53 @@ type cefWailsApp struct{}
 // OnBeforeCommandLineProcessing appends switches to Chromium's command
 // line before CEF parses argv.
 //
-// Key switches:
+// The X11/Wayland split is now driven by isOnWayland() (see
+// Decision C15 + cef_wayland_linux.go):
+//
+// X11 (default, current behavior preserved):
 //
 //   - ozone-platform=x11: CEF must create an X11 window that we can
 //     reparent into the GTK4 host window. Wayland does not support
 //     foreign-window embedding (no XReparentWindow equivalent).
-//
-//   - disable-gpu: On a forced-X11 Wayland session the GPU sandbox
-//     refuses to start and Chromium aborts with "GPU process isn't
-//     usable. Goodbye." at the first paint. Disabling GPU makes CEF
-//     fall back to the Skia software rasterizer, which is fine for
-//     the assetserver-served wails:// pages.
-//
-//     NOTE: --disable-software-rasterizer would ALSO disable the Skia
-//     fallback, leaving NO rendering pipeline → black screen.
 //
 //   - runtime-style=alloy: CEF 147 defaults to the Chrome runtime,
 //     which ignores WindowInfo.ParentWindow and always creates a
 //     fully-featured top-level window. The Alloy runtime matches the
 //     reference CEF GTK embedding sample and lets us reparent the
 //     browser view into our GtkBox.
+//
+// Wayland (Phase 5 / opt-in):
+//
+//   - ozone-platform=wayland: CEF talks to the compositor via
+//     Ozone/Wayland. We can't XReparentWindow into a Wayland
+//     surface, so CEF owns its own top-level window and the GTK4
+//     host becomes a placeholder.
+//
+//   - runtime-style=chrome: required for Wayland. The Alloy runtime
+//     does not have a Wayland surface implementation.
+//
+//   - --enable-features=UseOzonePlatform: required so the runtime-style
+//     flag actually selects Ozone.
+//
+// Single-process + disable-gpu are unconditional: they're orthogonal
+// to the display server (forced by the Go-runtime / fork limitation,
+// see Decision C1).
 func (a *cefWailsApp) OnBeforeCommandLineProcessing(processType string, commandLine cef.CommandLine) {
 	if commandLine == nil {
 		return
 	}
-	commandLine.AppendSwitchWithValue("ozone-platform", "x11")
+	if isOnWayland() {
+		commandLine.AppendSwitchWithValue("ozone-platform", "wayland")
+		commandLine.AppendSwitchWithValue("runtime-style", "chrome")
+		commandLine.AppendSwitch("enable-features=UseOzonePlatform")
+	} else {
+		commandLine.AppendSwitchWithValue("ozone-platform", "x11")
+		commandLine.AppendSwitchWithValue("runtime-style", "alloy")
+	}
 	commandLine.AppendSwitch("disable-gpu")
 	commandLine.AppendSwitch("in-process-gpu")
 	commandLine.AppendSwitch("single-process")
 	commandLine.AppendSwitchWithValue("lang", "en-US")
-	commandLine.AppendSwitchWithValue("runtime-style", "alloy")
 	commandLine.AppendSwitchWithValue("remote-debugging-port", "9999")
 
 	if resourcesDir := cefResourcesDir(); resourcesDir != "" {

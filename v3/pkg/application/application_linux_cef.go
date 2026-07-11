@@ -23,7 +23,6 @@ import (
 	"sync"
 
 	"github.com/bnema/purego-cef/cef"
-	"github.com/godbus/dbus/v5"
 	"github.com/wailsapp/wails/v3/internal/operatingsystem"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
@@ -103,17 +102,34 @@ func setProgramName(name string) { _ = name }
 // See IMPLEMENTATION.md 2026-07-10 session for the GPU-process crash
 // that motivated moving this out of os.Exit and into CEF's path.
 func init() {
-	if os.Getenv("GDK_BACKEND") == "" {
-		_ = os.Setenv("GDK_BACKEND", "x11")
-	}
-	if os.Getenv("GDK_BACKEND") == "x11" && os.Getenv("WAYLAND_DISPLAY") != "" {
-		_ = os.Unsetenv("WAYLAND_DISPLAY")
-	}
-	// CEF reads OZONE_PLATFORM at startup. x11 is the only backend
-	// that works reliably when GTK is on XWayland and the user has
-	// no working GPU sandbox.
-	if os.Getenv("OZONE_PLATFORM") == "" {
-		_ = os.Setenv("OZONE_PLATFORM", "x11")
+	// On Wayland, leave GDK_BACKEND alone so GTK4 picks its native
+	// Wayland backend (via the xdg-wayland or wayland GDK backend,
+	// whichever ships). XDG_SESSION_TYPE is the most reliable signal
+	// here because WAYLAND_DISPLAY isn't always exported (e.g.,
+	// inside containers, ssh, or when launchers strip it).
+	//
+	// On X11 (default, also the historical behavior) we force
+	// GDK_BACKEND=x11 and unset WAYLAND_DISPLAY. This was needed
+	// pre-Phase-5 because GTK would otherwise pick Wayland on a
+	// forced-X11 Wayland session and the CEF XReparentWindow path
+	// (see Decision C3) wouldn't work.
+	onWayland := os.Getenv("WAYLAND_DISPLAY") != "" ||
+		strings.EqualFold(os.Getenv("XDG_SESSION_TYPE"), "wayland") ||
+		strings.EqualFold(os.Getenv("GDK_BACKEND"), "wayland")
+
+	if !onWayland {
+		if os.Getenv("GDK_BACKEND") == "" {
+			_ = os.Setenv("GDK_BACKEND", "x11")
+		}
+		if os.Getenv("GDK_BACKEND") == "x11" && os.Getenv("WAYLAND_DISPLAY") != "" {
+			_ = os.Unsetenv("WAYLAND_DISPLAY")
+		}
+		// CEF reads OZONE_PLATFORM at startup. x11 is the only
+		// backend that works reliably when GTK is on XWayland and
+		// the user has no working GPU sandbox.
+		if os.Getenv("OZONE_PLATFORM") == "" {
+			_ = os.Setenv("OZONE_PLATFORM", "x11")
+		}
 	}
 
 	for _, a := range os.Args {
@@ -168,10 +184,19 @@ func (a *linuxApp) name() string {
 //
 // Phase 1: minimal. Real implementation lands in Phase 2.
 func (a *linuxApp) run() error {
+	a.setupCommonEvents()
+	a.listenForSystemThemeChangesCEF()
+	a.monitorPowerEventsCEF()
 	if err := cefInit(); err != nil {
 		return fmt.Errorf("wails/cef: init failed: %w", err)
 	}
 	a.markActivated()
+	// Fire Linux.ApplicationStartup after CEF init succeeds. setupCommonEvents
+	// (registered above) forwards this to Common.ApplicationStarted for any
+	// subscribers. Use a goroutine so the listener can't block appRun.
+	go func() {
+		applicationEvents <- newApplicationEvent(events.Linux.ApplicationStartup)
+	}()
 	defer cefShutdown()
 	return appRun(a.application)
 }
@@ -283,6 +308,11 @@ func newPlatformApp(parent *App) *linuxApp {
 	// inject into the V8 context.
 	setCefEnvironment(parent)
 
+	// Cache the SecurityOptions (allowed-methods list, CSRF nonce
+	// toggle) so OnDocumentAvailableInMainFrame can inject the right
+	// hardening knobs into every V8 context. See Decision C14.
+	setCefSecurityOptions(parent)
+
 	// Install the V8 extension BEFORE any browser is created. CEF only
 	// loads extensions that were registered before the browser's
 	// render process started.
@@ -372,11 +402,11 @@ func executeOnMainThread(callbackID uint) {
 	fn()
 }
 
-// processAndCacheScreens, setupCommonEvents, monitorPowerEvents, hideAllWindows,
-// showAllWindows, isOnMainThread helpers are Phase 1 stubs (the real ones live
-// in screen_linux.go / application_linux.go which we exclude from -tags cef).
+// processAndCacheScreens, hideAllWindows, showAllWindows, isOnMainThread
+// helpers are Phase 1 stubs (the real ones live in screen_linux.go /
+// application_linux.go which we exclude from -tags cef). setupCommonEvents
+// lives in events_common_linux_cef.go.
 func (a *linuxApp) processAndCacheScreens() error { return nil }
-func (a *linuxApp) setupCommonEvents()            {}
 func (a *linuxApp) hideAllWindows()               {}
 func (a *linuxApp) showAllWindows()               {}
 
@@ -393,46 +423,8 @@ func (a *App) platformEnvironment() map[string]any {
 	}
 }
 
-// listenForSystemThemeChangesCEF is the CEF build's D-Bus theme watcher.
-// It emits a "wails:theme:changed" event whenever the portal reports a
-// change in `org.freedesktop.appearance::color-scheme`.
-func listenForSystemThemeChangesCEF(a *linuxApp) {
-	conn, err := dbus.SessionBus()
-	if err != nil {
-		a.parent.error("failed to connect to session bus: %v", err)
-		return
-	}
-
-	if err = conn.AddMatchSignal(
-		dbus.WithMatchInterface("org.freedesktop.portal.Settings"),
-		dbus.WithMatchMember("SettingChanged"),
-	); err != nil {
-		return
-	}
-
-	c := make(chan *dbus.Signal, 10)
-	conn.Signal(c)
-
-	for s := range c {
-		if len(s.Body) < 3 {
-			continue
-		}
-		namespace, ok := s.Body[0].(string)
-		if !ok || namespace != "org.freedesktop.appearance" {
-			continue
-		}
-		key, ok := s.Body[1].(string)
-		if !ok || key != "color-scheme" {
-			continue
-		}
-		a.theme = "system"
-		a.parent.Event.Emit("wails:theme:changed", a.isDarkMode())
-	}
-}
-
 func fatalHandler(errFunc func(error)) { _ = errFunc }
 
 // silence unused import.
 var _ = events.Common
 var _ = sync.Mutex{}
-var _ = dbus.SessionBus
