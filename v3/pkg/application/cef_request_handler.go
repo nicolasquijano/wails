@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -217,9 +218,14 @@ type cefResourceRequestHandler struct {
 	isDownload bool
 	rawURL     string
 
-	// Populated by OnBeforeResourceLoad after the assetserver handler
-	// runs. status is the HTTP status; body is the response payload;
-	// mimeType is the Content-Type.
+	// Populated by Open() from the CEF request before serving.
+	// reqBody is the POST body bytes; reqHeaders are forwarded to the
+	// Go HTTP request so the HTTPTransport middleware can read
+	// x-wails-client-id / x-wails-window-name / x-wails-window-id.
+	reqBody    []byte
+	reqHeaders http.Header
+
+	// Populated by serveFromAssets after the assetserver handler runs.
 	status   int
 	mimeType string
 	body     []byte
@@ -274,6 +280,62 @@ func (r *cefResourceRequestHandler) OnResourceLoadComplete(_ cef.Browser, _ cef.
 func (r *cefResourceRequestHandler) OnProtocolExecution(_ cef.Browser, _ cef.Frame, _ cef.Request, _ *int32) {
 }
 
+// cefReadPostData extracts the full POST body from a CEF Request's
+// PostData. Returns nil if there is no post data. PostData consists
+// of one or more PostDataElement of type Bytes or File; we concatenate
+// all Bytes-type elements (files are skipped — not expected from the
+// Wails runtime).
+func cefReadPostData(req cef.Request) []byte {
+	postData := req.GetPostData()
+	if postData == nil {
+		return nil
+	}
+	count := postData.GetElementCount()
+	if count == 0 {
+		return nil
+	}
+	elements := make([]cef.PostDataElement, count)
+	postData.GetElements(&count, elements)
+
+	var buf bytes.Buffer
+	for _, el := range elements {
+		if el == nil {
+			continue
+		}
+		if el.GetType() != cef.PostdataelementTypePdeTypeBytes {
+			continue
+		}
+		sz := el.GetBytesCount()
+		if sz <= 0 {
+			continue
+		}
+		chunk := make([]byte, sz)
+		el.GetBytes(sz, unsafe.Pointer(&chunk[0]))
+		buf.Write(chunk)
+	}
+	if buf.Len() == 0 {
+		return nil
+	}
+	return buf.Bytes()
+}
+
+// cefForwardHeaders copies selected headers from a CEF Request to a
+// Go http.Header (used by the runtime HTTP transport for window/client
+// identification).
+func cefForwardHeaders(dst http.Header, req cef.Request) {
+	for _, name := range []string{
+		"x-wails-client-id",
+		"x-wails-window-name",
+		"x-wails-window-id",
+		"content-type",
+	} {
+		v := req.GetHeaderByName(name)
+		if v != "" {
+			dst.Set(name, v)
+		}
+	}
+}
+
 // Open is part of the new-style ResourceHandler API. We handle the
 // request synchronously: populate body from assetserver (if needed),
 // then signal CEF via handleRequest=1 + callback.Cont().
@@ -283,6 +345,12 @@ func (r *cefResourceRequestHandler) Open(request cef.Request, handleRequest *int
 	if request != nil {
 		rawURL = request.GetURL()
 		method = strings.ToUpper(request.GetMethod())
+
+		// Capture POST body and headers from CEF before building
+		// the Go HTTP request for the assetserver.
+		r.reqBody = cefReadPostData(request)
+		r.reqHeaders = http.Header{}
+		cefForwardHeaders(r.reqHeaders, request)
 	}
 	r.serveFromAssets(rawURL, method)
 	if handleRequest != nil {
@@ -293,17 +361,30 @@ func (r *cefResourceRequestHandler) Open(request cef.Request, handleRequest *int
 }
 
 // serveFromAssets populates r.body, r.status and r.mimeType from the
-// assetserver. It is a no-op if r.body is already set.
+// assetserver. It is a no-op if r.body is already set. The CEF
+// request body and headers (captured in Open()) are forwarded to
+// the Go handler so the HTTPTransport middleware can process
+// /wails/runtime calls.
 func (r *cefResourceRequestHandler) serveFromAssets(rawURL, method string) {
 	if r.body != nil {
 		return
 	}
-	httpReq, err := http.NewRequest(method, rawURL, nil)
+	var bodyReader io.Reader
+	if len(r.reqBody) > 0 {
+		bodyReader = bytes.NewReader(r.reqBody)
+	}
+	httpReq, err := http.NewRequest(method, rawURL, bodyReader)
 	if err != nil {
 		r.status = http.StatusBadRequest
 		r.mimeType = "text/plain; charset=utf-8"
 		r.body = []byte("wails/cef: bad request URL: " + err.Error())
 		return
+	}
+	// Forward headers so the HTTPTransport can read client/window IDs.
+	for k, vs := range r.reqHeaders {
+		for _, v := range vs {
+			httpReq.Header.Add(k, v)
+		}
 	}
 	cefHandlerMu.Lock()
 	h := cefHandlerAssets
