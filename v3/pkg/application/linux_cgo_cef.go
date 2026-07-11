@@ -43,18 +43,122 @@ static gboolean cef_is_on_main_thread(void) {
 	return g_main_context_is_owner(g_main_context_default());
 }
 
+// ── CEF view tracking list ──────────────────────────────────────────
+// A simple singly-linked list of (box, xid, last known size) entries.
+// On each idle pump tick we walk the list and resize any view whose
+// box allocation has changed.  This avoids any dependency on GObject
+// property notification timing, which is unreliable during X11 WM
+// resize/maximize events.
+struct cef_view_entry {
+	GtkWidget *box;
+	Window     xid;
+	int        last_w;
+	int        last_h;
+	struct cef_view_entry *next;
+};
+
+static struct cef_view_entry *cef_view_list = NULL;
+
+// Guards the shared linked list.  All operations happen on the main
+// GTK thread (the idle callback runs on it), so we only need the
+// guard to keep the C compiler / thread-sanitizer happy.
+static GMutex cef_view_mutex;
+
+// cef_view_check_resize checks whether the GtkBox backing a CEF view
+// has changed size and, if so, calls XResizeWindow.  Returns 1 if the
+// size changed (so the pump can collapse consecutive identical sizes).
+static int cef_view_check_resize(struct cef_view_entry *entry) {
+	if (!entry || !GTK_IS_WIDGET(entry->box) || entry->xid == 0) {
+		return 0;
+	}
+	int w = gtk_widget_get_width(entry->box);
+	int h = gtk_widget_get_height(entry->box);
+	if (w <= 0 || h <= 0) {
+		return 0;
+	}
+	if (w == entry->last_w && h == entry->last_h) {
+		return 0;
+	}
+	entry->last_w = w;
+	entry->last_h = h;
+
+	GtkNative *native = gtk_widget_get_native(entry->box);
+	if (!native) return 0;
+	GdkSurface *surface = gtk_native_get_surface(native);
+	if (!surface || !GDK_IS_X11_SURFACE(surface)) return 0;
+	Display *xdisplay = gdk_x11_display_get_xdisplay(
+		gdk_surface_get_display(surface)
+	);
+	XResizeWindow(xdisplay, entry->xid, (unsigned)w, (unsigned)h);
+	XFlush(xdisplay);
+	return 1;
+}
+
+// cef_view_list_add appends a (box, xid) pair to the tracking list.
+static void cef_view_list_add(GtkWidget *box, Window xid) {
+	if (!box || !GTK_IS_WIDGET(box) || xid == 0) return;
+	g_mutex_lock(&cef_view_mutex);
+	struct cef_view_entry *e = g_new0(struct cef_view_entry, 1);
+	e->box    = box;
+	e->xid    = xid;
+	e->last_w = -1;
+	e->last_h = -1;
+	e->next   = cef_view_list;
+	cef_view_list = e;
+	g_mutex_unlock(&cef_view_mutex);
+}
+
+// cef_view_list_remove removes the entry matching XID from the list.
+static void cef_view_list_remove(Window xid) {
+	if (xid == 0) return;
+	g_mutex_lock(&cef_view_mutex);
+	struct cef_view_entry **pp = &cef_view_list;
+	while (*pp) {
+		if ((*pp)->xid == xid) {
+			struct cef_view_entry *tmp = *pp;
+			*pp = tmp->next;
+			g_free(tmp);
+			break;
+		}
+		pp = &(*pp)->next;
+	}
+	g_mutex_unlock(&cef_view_mutex);
+}
+
+// cef_view_list_walk iterates every tracked view and resizes it if
+// the backing GtkBox has changed since the last check.
+// Returns the number of views still alive (total entries).
+static int cef_view_list_walk(void) {
+	int alive = 0;
+	g_mutex_lock(&cef_view_mutex);
+	struct cef_view_entry *cur = cef_view_list;
+	while (cur) {
+		if (GTK_IS_WIDGET(cur->box)) {
+			cef_view_check_resize(cur);
+			alive++;
+		}
+		cur = cur->next;
+	}
+	g_mutex_unlock(&cef_view_mutex);
+	return alive;
+}
+
 // cef_pump_message_loop_cb is installed via g_idle_add_full at
 // G_PRIORITY_DEFAULT_IDLE so it runs every GTK idle cycle. CEF uses
 // ExternalMessagePump + a manual pump (cef.DoMessageLoopWork) when
 // MultiThreadedMessageLoop is false. Without this pump, the GTK
 // main loop starves CEF — Chromium IPC callbacks never fire and the
-// host window never actually paints. Returns G_SOURCE_CONTINUE so
-// the source is re-armed after each tick.
+// host window never actually paints.
+//
+// We also walk the CEF view tracking list to catch layout changes
+// caused by maximize/tile/unmaximize that GObject property
+// notification signals are too unreliable to deliver.
 extern void doMessageLoopWorkCallback(void);
 
 static gboolean cef_pump_message_loop_cb(gpointer data) {
 	(void) data;
 	doMessageLoopWorkCallback();
+	cef_view_list_walk();
 	return G_SOURCE_CONTINUE;
 }
 
@@ -79,9 +183,8 @@ static void cef_connect_activate(GApplication *app) {
 }
 
 // cef_resize_cef_view resizes the CEF view's X11 window to fill the
-// GtkBox's current allocated size. Called from the size-allocate
-// signal handler. Updates the cached width/height so the handler
-// only fires XResizeWindow when the size actually changes.
+// GtkBox's current allocated size. Called immediately after
+// reparenting and also from the idle pump when the box size changes.
 static void cef_resize_cef_view(GtkWidget *widget, Window xid) {
 	if (!GTK_IS_WIDGET(widget) || xid == 0) {
 		return;
@@ -102,68 +205,22 @@ static void cef_resize_cef_view(GtkWidget *widget, Window xid) {
 	if (w <= 0 || h <= 0) {
 		return;
 	}
-	// CEF creates its view at the requested Bounds size; resize it
-	// to match the box's allocated area so the browser fills it.
 	XResizeWindow(xdisplay, xid, (unsigned)w, (unsigned)h);
 	XFlush(xdisplay);
 }
 
-// deferred_resize is an idle callback that runs AFTER the current
-// GTK layout cycle completes. At that point the GtkBox has its final
-// allocated size, so gtk_widget_get_width/height return the correct
-// post-layout dimensions. We ref the GtkBox at g_idle_add_full call
-// time and unref after use to guarantee the pointer stays alive.
-static gboolean deferred_resize(gpointer data) {
-	GtkWidget *box = GTK_WIDGET(data);
-	if (!GTK_IS_WIDGET(box)) {
-		g_object_unref(box);
-		return G_SOURCE_REMOVE;
-	}
-	gpointer xid_ptr = g_object_get_data(G_OBJECT(box), "wails-cef-view-xid");
-	if (!xid_ptr) {
-		g_object_unref(box);
-		return G_SOURCE_REMOVE;
-	}
-	Window xid = (Window)GPOINTER_TO_UINT(xid_ptr);
-	cef_resize_cef_view(box, xid);
-	g_object_unref(box);
-	return G_SOURCE_REMOVE;
-}
-
-// notify_size_cb is connected to the GtkWindow's "notify::width" and
-// "notify::height" signals.  GtkWindow::notify::width/height fires
-// BEFORE the child GtkBox is re-allocated, so reading the box size
-// synchronously would return the old value.  Instead, we schedule a
-// single-shot idle callback that runs after the current allocation
-// cycle and reads the final box size.
-static void notify_size_cb(GObject *obj, GParamSpec *pspec, gpointer data) {
-	(void)data;
-	(void)pspec;
-	GtkWidget *window = GTK_WIDGET(obj);
-	if (!GTK_IS_WINDOW(window)) {
-		return;
-	}
-	GtkWidget *box = gtk_window_get_child(GTK_WINDOW(window));
-	if (!box || !GTK_IS_WIDGET(box)) {
-		return;
-	}
-	// Schedule a deferred resize via idle callback.  We ref the box
-	// so it stays valid until the idle handler runs.
-	g_idle_add_full(G_PRIORITY_DEFAULT_IDLE,
-	                deferred_resize,
-	                g_object_ref(box),
-	                NULL);
-}
-
 // cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid`
 // (the host window created by CEF for its browser view) as a child of
-// the GTK widget `parent_widget`, then wires a size-allocate handler
-// so the CEF view follows the widget's bounds.
+// the GTK widget `parent_widget`, then adds the (box, xid) pair to
+// the tracking list so the idle message pump keeps the CEF view size
+// in sync with the GtkBox allocation.
 //
-// The notify::width/height signal is connected to the PARENT GtkWindow
-// (found via gtk_widget_get_native → root) because GtkBox does not
-// reliably fire property notifications during maximize/tile. The XID
-// is stashed on the box itself for lookup.
+// We do NOT connect GObject signal handlers for resize because
+// GtkWindow::notify::width/height fires before the child widget is
+// re-allocated during maximize events, and GtkBox does not fire
+// notify signals at all for WM-initiated size changes.  Instead the
+// idle pump (cef_view_list_walk) polls the GtkBox size on every
+// idle tick and issues XResizeWindow only when the size changes.
 static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long cef_window_xid) {
 	GtkWidget *widget = (GtkWidget *)parent_widget;
 	Window xid = (Window)cef_window_xid;
@@ -191,24 +248,8 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 	GdkDisplay *display = gdk_surface_get_display(surface);
 	Display *xdisplay = gdk_x11_display_get_xdisplay(display);
 
-	// Stash the CEF view XID on the GtkBox so the resize callback
-	// can find it.
-	g_object_set_data(G_OBJECT(widget), "wails-cef-view-xid",
-	                  GUINT_TO_POINTER((guint)xid));
-
-	// Connect property-notify handlers to the GtkWindow (not the box).
-	// GtkBox does not reliably fire notify::width/height during
-	// maximize.  The handler schedules a deferred idle callback so the
-	// resize runs after the box child has been re-allocated.
-	GtkWidget *gtk_window = GTK_WIDGET(gtk_widget_get_root(widget));
-	if (gtk_window && GTK_IS_WINDOW(gtk_window)) {
-		g_signal_connect(gtk_window, "notify::width", G_CALLBACK(notify_size_cb), NULL);
-		g_signal_connect(gtk_window, "notify::height", G_CALLBACK(notify_size_cb), NULL);
-	}
-
 	// XReparentWindow moves the CEF window under our GTK surface's
-	// X11 window. Place it at (0,0); the size-allocate handler will
-	// size it correctly.
+	// X11 window. Place it at (0,0); the idle pump will size it.
 	XReparentWindow(xdisplay, xid, parent_xid, 0, 0);
 
 	// Subscribe to ConfigureNotify on the CEF window itself in case
@@ -217,6 +258,10 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 
 	// Map the CEF window so it becomes visible.
 	XMapWindow(xdisplay, xid);
+
+	// Register this (box, xid) pair in the tracking list.  The idle
+	// pump picks it up on the next tick and issues the initial resize.
+	cef_view_list_add(widget, xid);
 }
 */
 import "C"
