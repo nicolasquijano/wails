@@ -296,9 +296,16 @@ func cefInit() error {
 	// CefApp whose OnBeforeCommandLineProcessing appends the switches
 	// before CEF parses argv.
 	cefApp := &cefWailsApp{}
-	// MaybeExitSubprocess runs os.Exit(0) if this process is a CEF helper
-	// subprocess (renderer, GPU, etc.).
-	cef.MaybeExitSubprocess()
+	// ExecuteSubprocess runs cef_execute_process to check if this process is a
+	// CEF helper subprocess (renderer, GPU, utility, etc.). Unlike the nil-App
+	// variant (MaybeExitSubprocess), we pass our cefWailsApp so subprocesses
+	// also receive OnBeforeCommandLineProcessing to apply our flags.
+	if executed, code, err := cef.ExecuteSubprocessWithApp(cefApp); err != nil {
+		debugLog("[cefInit] ExecuteSubprocessWithApp error: %v", err)
+	} else if executed {
+		debugLog("[cefInit] exiting as CEF subprocess (code=%d)", code)
+		os.Exit(code)
+	}
 	if err := cef.InitWithApp(cefSettings, cefApp); err != nil {
 		return err
 	}

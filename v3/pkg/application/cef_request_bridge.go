@@ -149,17 +149,17 @@ func (w *cefResponseWriter) Finish() error {
 	}
 	w.cefResp.SetStatus(int32(w.status))
 
-	if ct := w.headers.Get("Content-Type"); ct != "" {
-		w.cefResp.SetMimeType(ct)
-	} else {
-		w.cefResp.SetMimeType("application/octet-stream")
+	ct := w.headers.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
 	}
+	w.cefResp.SetMimeType(ct)
 
-	// Phase 2 limitation: cef.Response has no SetBody method. The body
-	// buffer is retained here so Phase 4 can stream it via a
-	// CefResourceHandler.ReadResponse callback. Until then, this writer
-	// is only useful for status / mime-type assertions; the actual
-	// body bytes are dropped.
+	// cef.Response has no SetBody, so header-level body injection is not
+	// possible from this path. The actual body is streamed through
+	// cefResourceRequestHandler.ReadResponse, which reads from the
+	// captureResponse buffer set in OnBeforeResourceLoad. This writer
+	// is only authoritative for status + Content-Type.
 	_ = w.body
 	return nil
 }

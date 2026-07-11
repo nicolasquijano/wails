@@ -53,10 +53,10 @@ func getCefRequestHandler() *cefRequestHandler {
 	}
 }
 
-// cefRequestHandler implements cef.RequestHandler. It routes every
-// request through OnBeforeResourceLoad where we either let CEF handle it
-// (for http(s) to arbitrary origins) or intercept it for our custom
-// wails:// and http://wails.localhost schemes.
+// cefRequestHandler implements cef.RequestHandler. It returns a
+// cefResourceRequestHandler for every resource request, which either
+// serves assets from the Go assetserver (for wails:// URLs) or lets
+// CEF handle the request normally.
 type cefRequestHandler struct {
 	assetsHandler http.Handler
 }
@@ -239,41 +239,10 @@ func isAssetURL(rawURL string) bool {
 	return false
 }
 
-// OnBeforeResourceLoad runs the assetserver handler synchronously and
-// stores the response. We let CEF continue to use the same request —
-// CEF then calls our GetResourceHandler which returns a body streamer.
-func (r *cefResourceRequestHandler) OnBeforeResourceLoad(_ cef.Browser, _ cef.Frame, request cef.Request, callback cef.Callback) cef.ReturnValue {
-	url := request.GetURL()
-	debugLog("[OnBeforeResourceLoad] url=%q isAsset=%v", url, isAssetURL(url))
-
-	if !isAssetURL(url) {
-		return cef.ReturnValueRvContinue
-	}
-
-	method := strings.ToUpper(request.GetMethod())
-
-	httpReq, err := http.NewRequest(method, url, nil)
-	if err != nil {
-		r.status = http.StatusBadRequest
-		r.mimeType = "text/plain; charset=utf-8"
-		r.body = []byte("wails/cef: bad request URL: " + err.Error())
-		callback.Cont()
-		return cef.ReturnValueRvContinue
-	}
-
-	cap := &captureResponse{header: http.Header{}}
-	r.parent.assetsHandler.ServeHTTP(cap, httpReq)
-
-	if cap.status == 0 {
-		cap.status = http.StatusOK
-	}
-	r.status = cap.status
-	r.mimeType = cap.contentType()
-	if r.mimeType == "" {
-		r.mimeType = "application/octet-stream"
-	}
-	r.body = cap.buf.Bytes()
-
+// OnBeforeResourceLoad lets CEF continue with the request. The actual
+// response is served by Open / GetResponseHeaders / Read on this same
+// handler (returned by GetResourceHandler).
+func (r *cefResourceRequestHandler) OnBeforeResourceLoad(_ cef.Browser, _ cef.Frame, _ cef.Request, callback cef.Callback) cef.ReturnValue {
 	callback.Cont()
 	return cef.ReturnValueRvContinue
 }
@@ -305,25 +274,75 @@ func (r *cefResourceRequestHandler) OnResourceLoadComplete(_ cef.Browser, _ cef.
 func (r *cefResourceRequestHandler) OnProtocolExecution(_ cef.Browser, _ cef.Frame, _ cef.Request, _ *int32) {
 }
 
-// Open is part of the new-style ResourceHandler API. We use the legacy
-// ProcessRequest + ReadResponse path so Open is a no-op.
-func (r *cefResourceRequestHandler) Open(_ cef.Request, _ *int32, callback cef.Callback) int32 {
+// Open is part of the new-style ResourceHandler API. We handle the
+// request synchronously: populate body from assetserver (if needed),
+// then signal CEF via handleRequest=1 + callback.Cont().
+func (r *cefResourceRequestHandler) Open(request cef.Request, handleRequest *int32, callback cef.Callback) int32 {
+	rawURL := ""
+	method := "GET"
+	if request != nil {
+		rawURL = request.GetURL()
+		method = strings.ToUpper(request.GetMethod())
+	}
+	r.serveFromAssets(rawURL, method)
+	if handleRequest != nil {
+		*handleRequest = 1
+	}
 	callback.Cont()
 	return 1
 }
 
-// ProcessRequest tells CEF we have the response ready synchronously.
-func (r *cefResourceRequestHandler) ProcessRequest(_ cef.Request, callback cef.Callback) int32 {
-	callback.Cont()
-	return 1
+// serveFromAssets populates r.body, r.status and r.mimeType from the
+// assetserver. It is a no-op if r.body is already set.
+func (r *cefResourceRequestHandler) serveFromAssets(rawURL, method string) {
+	if r.body != nil {
+		return
+	}
+	httpReq, err := http.NewRequest(method, rawURL, nil)
+	if err != nil {
+		r.status = http.StatusBadRequest
+		r.mimeType = "text/plain; charset=utf-8"
+		r.body = []byte("wails/cef: bad request URL: " + err.Error())
+		return
+	}
+	cefHandlerMu.Lock()
+	h := cefHandlerAssets
+	cefHandlerMu.Unlock()
+	if h == nil {
+		r.status = http.StatusInternalServerError
+		r.mimeType = "text/plain; charset=utf-8"
+		r.body = []byte("wails/cef: assetserver not wired")
+		return
+	}
+	cap := &captureResponse{header: http.Header{}}
+	h.ServeHTTP(cap, httpReq)
+	if cap.status == 0 {
+		cap.status = http.StatusOK
+	}
+	r.status = cap.status
+	r.mimeType = cap.contentType()
+	if r.mimeType == "" {
+		r.mimeType = "application/octet-stream"
+	}
+	r.body = cap.buf.Bytes()
+}
+
+// ProcessRequest is the old-style handler. Returns 0 since Open
+// handles the request via the new-style path.
+func (r *cefResourceRequestHandler) ProcessRequest(_ cef.Request, _ cef.Callback) int32 {
+	return 0
 }
 
 // GetResponseHeaders writes status + Content-Type into the response.
 // CEF then knows how many bytes to expect via responseLength.
+// IMPORTANT: SetMimeType must NOT include charset (e.g. "text/html"
+// without "; charset=utf-8") or CEF renders a blank page.
 func (r *cefResourceRequestHandler) GetResponseHeaders(response cef.Response, responseLength *int64, _ uintptr) {
-	fmt.Fprintf(os.Stderr, "wails/cef: GetResponseHeaders status=%d mime=%q body=%d bytes\n", r.status, r.mimeType, len(r.body))
 	response.SetStatus(int32(r.status))
-	response.SetMimeType(r.mimeType)
+	// Strip charset suffix from mimeType; CEF's SetMimeType renders a
+	// blank page when the value contains "; charset=...".
+	mime := strings.SplitN(r.mimeType, ";", 2)[0]
+	response.SetMimeType(mime)
 	if responseLength != nil {
 		*responseLength = int64(len(r.body))
 	}
@@ -337,21 +356,15 @@ func (r *cefResourceRequestHandler) Skip(bytesToSkip int64, bytesSkipped *int64,
 	return 0
 }
 
-// Read is the new-style async read. Unused (we use ReadResponse).
-func (r *cefResourceRequestHandler) Read(_ unsafe.Pointer, _ int32, _ *int32, _ cef.ResourceReadCallback) int32 {
-	return 0
-}
-
-// ReadResponse streams the body bytes into dataOut. CEF calls this in
-// a loop until bytesRead < bytesToRead. Returns 1 to indicate handled.
-func (r *cefResourceRequestHandler) ReadResponse(dataOut unsafe.Pointer, bytesToRead int32, bytesRead *int32, _ cef.Callback) int32 {
+// Read streams body bytes into dataOut for the new-style API (Open path).
+// CEF calls this in a loop until we return 0.
+func (r *cefResourceRequestHandler) Read(dataOut unsafe.Pointer, bytesToRead int32, bytesRead *int32, _ cef.ResourceReadCallback) int32 {
 	remaining := len(r.body)
-	fmt.Fprintf(os.Stderr, "wails/cef: ReadResponse bytesToRead=%d remaining=%d\n", bytesToRead, remaining)
 	if remaining == 0 {
 		if bytesRead != nil {
 			*bytesRead = 0
 		}
-		return 0 // EOF
+		return 0
 	}
 	n := int(bytesToRead)
 	if n > remaining {
@@ -364,6 +377,12 @@ func (r *cefResourceRequestHandler) ReadResponse(dataOut unsafe.Pointer, bytesTo
 		*bytesRead = int32(n)
 	}
 	return 1
+}
+
+// ReadResponse is the old-style API. Returns 0 since Open handles the
+// request via the new-style path.
+func (r *cefResourceRequestHandler) ReadResponse(_ unsafe.Pointer, _ int32, _ *int32, _ cef.Callback) int32 {
+	return 0
 }
 
 // Cancel is called by CEF when the request is aborted.
@@ -426,8 +445,12 @@ func debugLog(format string, args ...any) {
 // per request.
 type cefWailsSchemeFactory struct{}
 
-func (f *cefWailsSchemeFactory) Create(_ cef.Browser, _ cef.Frame, _ string, _ cef.Request) cef.ResourceHandler {
-	return &cefResourceRequestHandler{}
+func (f *cefWailsSchemeFactory) Create(_ cef.Browser, _ cef.Frame, _ string, request cef.Request) cef.ResourceHandler {
+	rawURL := ""
+	if request != nil {
+		rawURL = request.GetURL()
+	}
+	return &cefResourceRequestHandler{rawURL: rawURL}
 }
 
 // registerWailsScheme registers "wails" as a custom scheme with CEF.
@@ -436,22 +459,11 @@ func (f *cefWailsSchemeFactory) Create(_ cef.Browser, _ cef.Frame, _ string, _ c
 //
 // Returns true if registration succeeded.
 func registerWailsScheme() bool {
-	f, _ := os.OpenFile("/tmp/wails-cef-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if f != nil {
-		defer f.Close()
-		fmt.Fprintf(f, "[registerWailsScheme] called at %v\n", time.Now().Format("15:04:05.000"))
-	}
 	ctx := cef.RequestContextGetGlobalContext()
 	if ctx == nil {
-		if f != nil {
-			fmt.Fprintln(f, "[registerWailsScheme] ctx is nil")
-		}
 		return false
 	}
 	factory := cef.NewSchemeHandlerFactory(&cefWailsSchemeFactory{})
 	rc := ctx.RegisterSchemeHandlerFactory("wails", "", factory)
-	if f != nil {
-		fmt.Fprintf(f, "[registerWailsScheme] rc=%d\n", rc)
-	}
 	return rc == 1
 }
