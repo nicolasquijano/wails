@@ -497,7 +497,7 @@ func cefDestroyWindow(window pointer) {
 // GdkSurface → XID, so it correctly identifies the GtkWindow as the
 // X11 parent of the CEF view even when we hand it a GtkBox (which
 // has no native surface of its own).
-func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string) cef.Browser {
+func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, url string, width, height int) cef.Browser {
 	if gtkWindow == nil {
 		debugLog("[cefCreateBrowserInWidget] gtkWindow is nil")
 		return nil
@@ -542,12 +542,19 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 	// Force the legacy "Alloy" runtime. CEF 147 defaults to the
 	// Chrome runtime which doesn't honour ParentWindow the same way.
 	wi.RuntimeStyle = cef.RuntimeStyleAlloy
-	// Bounds: zero rect means "fill the screen". CEF picks its own
-	// position/size; we reparent and resize after creation.
+	// Bounds: initial size for the CEF view. After reparenting into
+	// the GtkBox, the notify::width/height handler resizes it to match
+	// the actual box allocation.
+	if width <= 0 {
+		width = 800
+	}
+	if height <= 0 {
+		height = 600
+	}
 	wi.Bounds.X = 0
 	wi.Bounds.Y = 0
-	wi.Bounds.Width = 800
-	wi.Bounds.Height = 600
+	wi.Bounds.Width = int32(width)
+	wi.Bounds.Height = int32(height)
 
 	settings := cef.NewBrowserSettings()
 

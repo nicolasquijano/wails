@@ -126,11 +126,22 @@ func (w *linuxWebviewWindow) run() {
 
 	debugLog("[linuxWebviewWindow.run] about to call cefCreateBrowserInWidget vbox=%v url=%q", w.vbox != nil, w.parent.options.URL)
 
-	// 4. Create CEF browser attached to the GtkBox.
+	// 4. Create CEF browser attached to the GtkBox. Pass the window
+	// dimensions so the CEF view starts at the right size instead of
+	// the hardcoded 800x600.
+	ww := w.parent.options.Width
+	wh := w.parent.options.Height
+	if ww <= 0 {
+		ww = 800
+	}
+	if wh <= 0 {
+		wh = 600
+	}
 	w.browser = cefCreateBrowserInWidget(
 		unsafe.Pointer(w.window),
 		unsafe.Pointer(w.vbox),
 		w.parent.options.URL,
+		ww, wh,
 	)
 	debugLog("[linuxWebviewWindow.run] cefCreateBrowserInWidget returned browser=%v", w.browser != nil)
 
