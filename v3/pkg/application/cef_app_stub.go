@@ -86,6 +86,7 @@ const (
 	cefSchemeOptionStandard        = 0x01
 	cefSchemeOptionLocal           = 0x02
 	cefSchemeOptionDisplayIsolated = 0x04
+	cefSchemeOptionSecure          = 0x08
 	cefSchemeOptionCORSEnabled     = 0x10
 	cefSchemeOptionFetchEnabled    = 0x40
 )
@@ -98,10 +99,9 @@ func (a *cefWailsApp) OnRegisterCustomSchemes(registrar cef.SchemeRegistrar) {
 		return
 	}
 	options := cefSchemeOptionStandard |
-		cefSchemeOptionLocal |
-		cefSchemeOptionDisplayIsolated |
 		cefSchemeOptionCORSEnabled |
-		cefSchemeOptionFetchEnabled
+		cefSchemeOptionFetchEnabled |
+		cefSchemeOptionSecure
 	registrar.AddCustomScheme("wails", int32(options))
 }
 func (a *cefWailsApp) GetResourceBundleHandler() cef.ResourceBundleHandler { return nil }
