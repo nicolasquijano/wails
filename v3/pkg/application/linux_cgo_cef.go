@@ -108,26 +108,30 @@ static void cef_resize_cef_view(GtkWidget *widget, Window xid) {
 	XFlush(xdisplay);
 }
 
-// notify_size_cb is connected to the GtkBox's "notify::width" and
-// "notify::height" property notify signals. It looks up the CEF
-// view XID we stashed in widget data and resizes the CEF view to
-// match. The XID is stored via g_object_set_data with the key
-// "wails-cef-view-xid".
+// notify_size_cb is connected to the GtkWindow's "notify::width" and
+// "notify::height" property notify signals (the GtkBox child is what
+// actually contains the CEF view). It looks up the CEF view XID from
+// the box's widget data and resizes to match the box's current size.
 //
-// GTK4 dropped the GTK3 "size-allocate" signal, so we use property
-// notify instead. GObject fires the notify signal when a GObject
-// property changes, and GtkWidget exposes width/height as readable
-// properties via gtk_widget_get_width/height.
+// We connect to the GtkWindow instead of the GtkBox because GtkBox
+// does NOT reliably fire notify::width/height when the window is
+// maximized or tiled — only the GtkWindow guarantees a notification.
 static void notify_size_cb(GObject *obj, GParamSpec *pspec, gpointer data) {
 	(void)data;
 	(void)pspec;
-	GtkWidget *widget = GTK_WIDGET(obj);
-	gpointer xid_ptr = g_object_get_data(obj, "wails-cef-view-xid");
+	GtkWidget *window = GTK_WIDGET(obj);
+
+	// The GtkBox is the window's single child.
+	GtkWidget *box = gtk_window_get_child(GTK_WINDOW(window));
+	if (!box) {
+		return;
+	}
+	gpointer xid_ptr = g_object_get_data(G_OBJECT(box), "wails-cef-view-xid");
 	if (!xid_ptr) {
 		return;
 	}
 	Window xid = (Window)GPOINTER_TO_UINT(xid_ptr);
-	cef_resize_cef_view(widget, xid);
+	cef_resize_cef_view(box, xid);
 }
 
 // cef_attach_to_gtk_widget reparents the X11 window `cef_window_xid`
@@ -135,9 +139,10 @@ static void notify_size_cb(GObject *obj, GParamSpec *pspec, gpointer data) {
 // the GTK widget `parent_widget`, then wires a size-allocate handler
 // so the CEF view follows the widget's bounds.
 //
-// GTK4 removed gdk_x11_surface_set_embedder (used in GTK3 to embed
-// foreign X11 windows). We use XReparentWindow + a size-allocate
-// signal handler to keep the CEF view sized to the box.
+// The notify::width/height signal is connected to the PARENT GtkWindow
+// (found via gtk_widget_get_native → root) because GtkBox does not
+// reliably fire property notifications during maximize/tile. The XID
+// is stashed on the box itself for lookup.
 static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long cef_window_xid) {
 	GtkWidget *widget = (GtkWidget *)parent_widget;
 	Window xid = (Window)cef_window_xid;
@@ -165,18 +170,19 @@ static void cef_attach_to_gtk_widget(unsigned long parent_widget, unsigned long 
 	GdkDisplay *display = gdk_surface_get_display(surface);
 	Display *xdisplay = gdk_x11_display_get_xdisplay(display);
 
-	// Stash the CEF view XID on the widget so the size-allocate
-	// handler can find it.
+	// Stash the CEF view XID on the GtkBox so the resize callback
+	// can find it.
 	g_object_set_data(G_OBJECT(widget), "wails-cef-view-xid",
 	                  GUINT_TO_POINTER((guint)xid));
 
-	// Connect property-notify handlers for the widget's width/height.
-	// We do this before XReparentWindow so the first allocation
-	// (which happens shortly after gtk_window_present) resizes the
-	// CEF view to match the actual box bounds — not the 800×600 we
-	// passed in WindowInfo.Bounds.
-	g_signal_connect(widget, "notify::width", G_CALLBACK(notify_size_cb), NULL);
-	g_signal_connect(widget, "notify::height", G_CALLBACK(notify_size_cb), NULL);
+	// Connect property-notify handlers to the GtkWindow (not the box)
+	// because GtkBox does not reliably fire notify::width/height
+	// during maximize.  The GtkWindow is the root widget.
+	GtkWidget *gtk_window = GTK_WIDGET(gtk_widget_get_root(widget));
+	if (gtk_window && GTK_IS_WINDOW(gtk_window)) {
+		g_signal_connect(gtk_window, "notify::width", G_CALLBACK(notify_size_cb), NULL);
+		g_signal_connect(gtk_window, "notify::height", G_CALLBACK(notify_size_cb), NULL);
+	}
 
 	// XReparentWindow moves the CEF window under our GTK surface's
 	// X11 window. Place it at (0,0); the size-allocate handler will
