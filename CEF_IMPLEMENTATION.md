@@ -4,7 +4,7 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-10)**: The CEF backend is functional for single-process X11 embedding with the Alloy runtime. Multi-process mode and Wayland support are not yet working.
+**Current status (2026-07-11)**: All four phases complete. CEF embedding, basic app support, IPC/runtime, and features/polish all implemented. Window management from JS verified end-to-end via puppeteer CDP. System dialogs wired with graceful fallback (renderer-initiated works, Go-initiated disabled due to single-process SIGSEGV — see Decision C10). Three working demos: `cef-hello`, `cef-multiwin`, `cef-shadcn-admin`.
 
 **Build tag**: `cef` (e.g. `go build -tags cef`). Cannot be combined with the WebKit build tags (`gtk3`).
 
@@ -21,16 +21,13 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - Single-process is the only reliable mode until the CEF subprocess model can tolerate a Go host
 - Tradeoff: no process isolation per renderer, but all major Chromium features work (JS, CSS, WebSocket, Canvas, WebGL)
 
-### Decision C2: X11 only (2026-07-07)
+### Decision C2: X11 only (2026-07-07) — SUPERSEDED by C15 (2026-07-11)
 
 **Context**: CEF's X11 embedding uses `XReparentWindow` to insert the CEF view into a GTK container. This is a pure X11 operation with no Wayland equivalent.
 
-**Decision**: Force GDK backend to X11 (`gdk_set_allowed_backends("x11")`, `unset WAYLAND_DISPLAY`). Pass `--ozone-platform=x11`.
+**Original decision (C2)**: Force GDK backend to X11 (`gdk_set_allowed_backends("x11")`, `unset WAYLAND_DISPLAY`). Pass `--ozone-platform=x11`.
 
-**Rationale**:
-- Wayland protocol does not allow arbitrary `XReparentWindow`-style embedding
-- GDK Wayland → X11 interop (xdg-foreign) requires CEF to export its surface, which no current CEF build supports
-- Switch to Chrome runtime (not Alloy) might enable native Ozone/Wayland in future CEF versions
+**Superseded by Decision C15 (Phase 5)**: Wayland is now supported via the Chrome runtime + Ozone/Wayland. On Wayland sessions CEF runs as its own top-level Wayland window (`cefCreateBrowserDetached`); the GTK4 host stays as a placeholder. See Decision C15 for the full rationale. The X11-only paths (`XReparentWindow`, `gdk_set_allowed_backends("x11")`, `gdk_x11_surface_get_xid`) remain in place for X11 sessions — they're gated behind `isOnWayland()` so they're never called on Wayland.
 
 ### Decision C3: No ParentWindow / manual reparenting (2026-07-07)
 
@@ -64,6 +61,18 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - Alloy is the classic CEF embedding API that supports `XReparentWindow` + `CefBrowserHost::GetWindowHandle`
 - Chrome runtime may work better with Ozone/Wayland in the future, but currently breaks reparenting
 
+### Decision C8: OnLoadEnd drives runtime-ready instead of JS invoke (2026-07-10)
+
+**Context**: The CEF V8 extension (`cef_js_shim.js`) registers a native `wails_invoke` function and sets `window.wails.invoke = function(msg) { wails_invoke(msg); }` long before any page script runs. However, the Wails runtime JS module (`runtime.js`, line 1622) later assigns `window.wails = index_exports`, **overwriting the entire `window.wails` object** and losing the native `invoke` function. Consequently, `invoke("wails:runtime:ready")` silently fails, `runtimeLoaded` stays `false`, and all pending JS (`ExecJS` calls before ready) stays queued forever.
+
+**Decision**: Hook CEF's `OnLoadEnd` callback (on `cef.LoadHandler`) and call `WebviewWindow.HandleMessage("wails:runtime:ready")` from Go when the main frame finishes loading. The callback is dispatched via `InvokeAsync` to avoid deadlocking on CEF's UI thread (which is the main thread in single-process mode).
+
+**Rationale**:
+- The Go-side `OnLoadEnd` fires after all deferred scripts (including `runtime.js`) have executed — `window._wails.dispatchWailsEvent` is guaranteed to be available
+- Avoids fighting JS module-level assignment order
+- No changes needed to the compiled runtime bundle
+- Works even when the JS-side "Browser Environment Detected" warning is shown (because `_invoke` is null)
+
 ### Decision C7: Route HTTP POST body through CEF→Go (2026-07-10)
 
 **Context**: The JS runtime uses HTTP fetch POST to `/wails/runtime` by default. The CEF resource handler (`cefResourceRequestHandler`) was creating a Go `http.Request` with `nil` body, discarding the request payload.
@@ -84,6 +93,192 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 **Rationale**:
 - `LOCAL` causes Chromium to treat the scheme as opaque origin (`null`), which blocks same-origin JS/CSS loading even with CORS headers
 - Without `LOCAL`, the origin is `wails://localhost`, JS/CSS loads correctly, and CORS headers in the response are honored
+
+### Decision C9: X11 helpers for window management (2026-07-11)
+
+**Context**: GTK4 removed `gtk_window_move`, `gtk_window_get_position`, `gtk_window_set_keep_above`, and `WM_NORMAL_HINTS`-based max-size hints. The WebKit/GTK4 backend has these as static C functions in `linux_cgo.c` (tagged `!cef`).
+
+**Decision**: Add C helpers directly in the CGo preamble of `linux_cgo_cef.go`:
+- `window_move_x11` — X11 `XMoveWindow` (no GTK4 equivalent)
+- `window_get_position_x11` — X11 `XTranslateCoordinates`
+- `window_set_always_on_top_x11` — `_NET_WM_STATE` X11 atom
+- `window_set_max_size_x11` — `WM_NORMAL_HINTS`
+- `window_is_minimised` — `gdk_toplevel_get_state`
+
+**Rationale**:
+- The CEF backend links `x11` directly via `#cgo pkg-config: x11`, so direct Xlib calls work without `dlsym` indirection
+- Functions are static helpers inside the CGo preamble — no need for a separate `linux_cgo_cef.c` file
+- Same approach used by the WebKit backend (just bundled in the same file as the GTK4 helpers there)
+
+### Decision C10: System dialogs use Chromium defaults (2026-07-11)
+
+**Context**: CEF provides three integration points for dialogs:
+- `cef.DialogHandler.OnFileDialog` — called when renderer requests a file dialog (e.g. `<input type="file">`)
+- `cef.JsdialogHandler.OnJsdialog` — called for `alert`/`confirm`/`prompt`
+- `CefBrowserHost::RunFileDialog` — Go-initiated file dialog
+
+In single-process mode (Decision C1), `RunFileDialog` triggers SIGSEGV when the dialog is dismissed. The crash is in Chromium's V8/Mojo teardown path that requires subprocess isolation.
+
+**Decision**: 
+- `cefDialogHandler.OnFileDialog` returns 0 → Chromium uses its native chooser
+- `cefJsdialogHandler.OnJsdialog` returns 0 → Chromium uses native modal dialogs
+- `cefJsdialogHandler.OnBeforeUnloadDialog` always returns true → no JS confirm prompt on window close
+- `linuxOpenFileDialog.show` / `linuxSaveFileDialog.show` return graceful error (not crash)
+
+**Rationale**:
+- Renderer-initiated `<input type="file">` works perfectly via return-0
+- JS `alert`/`confirm`/`prompt` work via return-0 (Chromium renders modals)
+- Go-initiated file dialogs are blocked at the CEF level, not our bug — would need a separate subprocess binary to fix (Decision C1)
+- Wails apps use JS-side modals for messages, not Go MessageDialog, so the no-op there is fine
+
+### Decision C11: Drag-and-drop via DragHandler.OnDragEnter + native bridge (2026-07-11)
+
+**Context**: The Wails runtime JS (`runtime.js`) attaches `dragenter`/`dragover`/`drop` listeners to `documentElement` and, on drop, recovers file paths via `window.chrome.webview.postMessageWithAdditionalObjects` — a WebView2-only API. CEF has no equivalent. Additionally, the standard browser `dataTransfer.files` exposes `File` objects (which carry content but no local path), not the absolute paths the Wails `WindowFilesDropped` event expects.
+
+CEF does, however, give us `cef.DragHandler.OnDragEnter`, which fires *before* the DOM drop event with a `cef.DragData` whose `GetFilePaths()` returns the OS-level absolute paths of the files being dragged.
+
+**Decision**: Wire `cef_drag_handler.go` so that:
+
+1. `OnDragEnter` stashes the `DragData` on the window's `dragSlot` and returns `DragOperationCopy`. Returning `Copy` (instead of `None`) keeps the drag alive so the browser still fires DOM drop events.
+2. A new native function `wails_cefResolveDrop(id, x, y)` is added to `cef_js_shim.js` and routed through `cef_v8_handler.go::handleCefResolveDrop`. The id argument is the CEF browser identifier, which Go exposes to JS via `OnDocumentAvailableInMainFrame` (`window._wailsCefBrowserId`).
+3. The JS shim installs a capture-phase `drop` listener that calls `wails_cefResolveDrop`, parses the JSON array of paths, and forwards them to `_wails.handlePlatformFileDrop(paths, x, y)`. Capture phase guarantees we run *before* the runtime's bubble-phase listener that depends on WebView2.
+4. `cefCreateBrowserInWidget` registers `registerCefBrowser(id, w)` so the V8 handler can find the owning window from the browser id. `destroy()` calls `unregisterCefBrowser(id)` to drop the mapping on shutdown.
+
+**Rationale**:
+- The WebView2 path in `runtime.js` keeps working unchanged for Windows; CEF gets its own path through the new shim function.
+- Per-window `dragSlot` (mutex-protected) handles concurrent multi-window drags without races.
+- The `dragData` reference is only safe to read during an active drag; clearing it inside `cefResolveDragDrop` (under lock) means a stale drop handler can't see leaked paths.
+- `intToJSNumber` is a deterministic int32→JS literal formatter used to inject `window._wailsCefBrowserId` without pulling `strconv` into the JS-injection hot path.
+
+### Decision C12: Async transport via `wails_invokeAsync` + `_wailsAndroidCallback` (2026-07-11)
+
+**Context**: The CEF V8 extension currently exposes only `wails_invoke` (synchronous — the JS thread blocks until Go returns). Long-running service methods (anything taking >100ms, network calls, file I/O, etc.) freeze the UI because V8 and the GTK main loop are the same thread in single-process mode. The Wails runtime JS already supports an async transport on Android (`window.wails.invokeAsync` + `_wailsAndroidCallback`) — when present, `runtimeCallWithID` uses a customTransport that returns a Promise immediately, lets Go process the call in the background, and resolves the Promise when Go injects `_wailsAndroidCallback(id, response, error)` via the webview's evaluateJavascript.
+
+**Decision**: Wire the same pattern for CEF:
+
+1. **JS shim** (`cef_js_shim.js`) adds a new native binding `wails_invokeAsync(callId, payload)` and exposes `window.wails.invokeAsync = (callId, payload) => wails_invokeAsync(...)`. When the runtime detects `window.wails.invokeAsync` is a function, it auto-switches to customTransport — no change to the runtime bundle required.
+
+2. **Go side** (`cef_v8_handler.go`):
+   - `handleInvokeAsync(browserId, callId, payload)` spawns a goroutine that:
+     - Decodes the JSON RuntimeRequest.
+     - Calls `cefV8Proc.HandleRuntimeCallWithIDs(ctx, &req)` (the same path as sync, with the same 30s timeout).
+     - On completion calls `cefResolveAsyncCall(w, callId, payload, err)` which schedules `frame.ExecuteJavaScript("window._wailsAndroidCallback(...)")` on the CEF UI thread via `InvokeAsync` (g_idle_add_full in the CGo preamble).
+   - `cefResolveAsyncCall` builds the success envelope `{ok: true, data: <json>}` or the error variant; the runtime's `_wailsAndroidCallback` looks up the Promise in its `pending` map and resolves/rejects it.
+
+3. **`wails_callback` round-trip** is also wired: `window.wails.handleCallback(id, ok, result)` (defined in the JS shim) calls native `wails_callback`, which records into a bounded ring (`cefCallbackLog`, cap 64) for future push-notification subscribers. Today this is a no-op for delivery — the round-trip exists so future Go→JS→Go flows (event confirmations, subscription ACKs) don't need a shim change.
+
+**Rationale**:
+- Blocking V8 inside a service method freezes the entire UI (window can't be moved, button clicks don't register). The async transport fixes this without changing the MessageProcessor or service method signatures.
+- `window.wails.invokeAsync` being a function is the runtime's **only** trigger for switching to customTransport; no build step, no runtime bundle update.
+- The success envelope `{"ok":true,"data":...}` mirrors the runtime's existing JSON.parse logic exactly, so the JS Promise resolves to the same value the sync path returns.
+- `InvokeAsync` is required for the JS injection — `frame.ExecuteJavaScript` is only safe on the CEF UI thread (which is the main thread in single-process mode). Running it from the goroutine would race with V8 and the Chromium message loop.
+- The bounded callback ring is for diagnostics; once a real push-notification consumer exists it should switch to a map keyed by call id.
+
+### Decision C14: V8 extension context isolation (2026-07-11)
+
+**Context**: The CEF V8 extension shim (`cef_js_shim.js`) defined `wails_invoke` as a `native function` inside an IIFE and exposed `window.wails.invoke` as a thin wrapper. Page scripts — including any DevTools user — could call the wrapper freely. The native function itself was hidden by V8's lexical-scope rule on native bindings, but the wrapper had no defense-in-depth: any XSS payload or DevTools console could call `Call.ByName("main.Greeter.SensitiveOp", ...)` without restriction.
+
+**Decision**: Layer three defenses on top of the existing closure isolation:
+
+1. **Closure isolation (already in place, now documented)**: V8 enforces lexical scope on `native function` declarations (per the CEF docs: "The calling of a native function is restricted to the scope in which the prototype of the native function is defined"). All eight native bindings (`wails_invoke`, `wails_invokeAsync`, `wails_callback`, `wails_log`, `wails_setFlags`, `wails_setEnvironment`, `wails_emit`, `wails_cefResolveDrop`) live inside the IIFE. The only attack surface from page scripts is the JS wrappers on `window.wails` / `window._wails`.
+
+2. **Input validation in the wrappers** (`cef_js_shim.js`): `wailsInvoke` and `wailsInvokeAsync` now validate argument shape (rejects `null` / `undefined` payloads, wraps objects via `JSON.stringify`, wraps thrown native errors into `console.error` rather than letting them propagate as uncaught exceptions). Both wrappers `try/catch` around the native call so a Go-side panic can't surface as an uncaught JS exception.
+
+3. **Optional method allow-list** (`Options.Security.AllowedMethods`): when non-empty, the wrapper rejects `Call.ByName(...)` invocations whose `methodName` isn't in the list. Built-in subsystems (`Window.*`, `Events.*`, `System.*`, `Screens.*`, `Clipboard.*`, `Browser.*`, `Dialogs.*`, `Application.*`, `CancelCall.*`, `IOS.*`, `Android.*`) are always allowed because the runtime uses them internally — locking them out would break the runtime. Default = no restriction (matches prior behavior).
+
+4. **Optional per-navigation CSRF nonce** (`Options.Security.EnforceCSRFNonce`): when true, every `window.wails.invoke(msg, nonce)` / `window.wails.invokeAsync(id, payload, nonce)` must carry a nonce matching `window._wails.cefNonce` (a 16-char hex string Go regenerates on every `OnDocumentAvailableInMainFrame` via `crypto/rand`). The runtime bundle doesn't pass a nonce — that's fine when enforcement is off; when it's on, every runtime call from the runtime bundle is rejected, which is the intended behavior for hardening deployments where you want only *your* code calling IPC, not the runtime's existing `Call.ByName` plumbing. Apps that opt in have to wrap their own JS to read the nonce and pass it on every call.
+
+**Threat model**:
+
+| Layer | What it blocks | What it doesn't block |
+|---|---|---|
+| Native lexical scope | Direct calls to `wails_invoke` etc. from outside the IIFE | Wrapper calls (intentional) |
+| Wrapper input validation | Null/non-serializable payloads, uncaught exceptions | A motivated DevTools user |
+| Method allow-list | Service methods (`main.Greeter.X`) not in the list | Built-in subsystem methods (Window, Events, etc.) |
+| CSRF nonce | Runtime bundle's default `Call.ByName` calls (when enforced) | Any JS the attacker controls on the page |
+
+A DevTools user can always read `window._wails.cefNonce` and pass it on; the nonce only defeats scripted IPC that runs without page-script execution (e.g., a future hypothetical "blind" IPC that the runtime bundle does on its own). The allow-list is the meaningful defense: it bounds the *set* of methods that can be called regardless of how the wrapper is invoked.
+
+**Implementation notes**:
+
+- `Options.Security` is a new struct in `application_options.go`. All fields are opt-in (zero value = prior behavior) and the field is a no-op on non-CEF builds.
+- `setCefSecurityOptions(app)` caches the allow-list + enforcement flag in `cefSecurityCache` (RWMutex-protected, set once at app init).
+- `buildCefSecurityInjection(nonce)` returns a JS fragment appended to `OnDocumentAvailableInMainFrame`'s `flags`/`environment` push. It sets `window._wails.cefAllowedMethods`, `cefEnforceNonce`, `cefNonce` on every navigation.
+- `generateCefCSPNonce` reads 8 bytes from `crypto/rand` and hex-encodes them (16 lowercase hex chars). Smoke-tested with `TestGenerateCefCSPNonceSmoke` (variation + format).
+- `appendJSQuoted` handles the C0/quote/backslash escapes a random nonce might need (tested with `TestAppendJSQuoted`).
+- The wrapper uses `indexOf` (not `Array.includes`) on the JSON array literal because V8's Array.prototype.includes wasn't always available across the Chromium versions we support; `indexOf` is universally available.
+
+### Decision C15: Wayland support (Phase 5) (2026-07-11)
+
+**Context**: Phase 5 of the plan calls for native Wayland support. CEF 147 ships with Ozone/Wayland in `libcef.so` (the wayland host is at `ui/ozone/platform/wayland/host/` per the binary's `strings` output) but the Alloy runtime — which the Wails CEF backend used pre-Phase-5 — has no Wayland surface implementation. To support Wayland we need to:
+
+1. Detect Wayland sessions (env: `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `GDK_BACKEND`).
+2. Switch CEF's Ozone platform and runtime style based on the detected backend.
+3. Avoid the X11-only paths (`XReparentWindow`, `gdk_x11_surface_get_xid`, `gdk_set_allowed_backends("x11")`) on Wayland — these crash with NULL-deref or silently produce detached X11 windows under XWayland.
+4. Document the limitation: Wayland compositors don't honour explicit window placement, so `move()`/`SetPosition()`/`center()` become no-ops.
+
+**Decision**:
+
+1. **`detectWaylandSession()`** (in `cef_wayland_linux.go`) returns true if any of `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, or `GDK_BACKEND` indicates Wayland. The result is cached after first read — `resetWaylandDetection()` is exposed for tests. Three signals matter because:
+   - `WAYLAND_DISPLAY` is the canonical signal but is unset in containers / ssh sessions.
+   - `XDG_SESSION_TYPE=wayland` survives shells that lose `WAYLAND_DISPLAY`.
+   - `GDK_BACKEND=wayland` is the explicit opt-in (force Wayland even when neither env var is set).
+
+2. **`cef_app_stub.go::OnBeforeCommandLineProcessing`** now branches:
+   - **X11**: `--ozone-platform=x11 --runtime-style=alloy` (unchanged).
+   - **Wayland**: `--ozone-platform=wayland --runtime-style=chrome --enable-features=UseOzonePlatform`. The Chrome runtime is required because Alloy cannot create a Wayland surface.
+
+3. **`init()` in `application_linux_cef.go`** no longer forces `GDK_BACKEND=x11` / `OZONE_PLATFORM=x11` on Wayland sessions. The original "force X11" logic was the pre-Phase-5 answer to "the CEF XReparentWindow path needs X11"; with the new detached-Wayland path that pressure is gone.
+
+4. **`cefInit()` in `linux_cgo_cef.go`** calls `gdk_set_allowed_backends` with `"wayland"` on Wayland and `"x11"` on X11. This was the source of the user-reported "transparent X11 window" bug: locking GTK to X11 on a Wayland session forced GTK through XWayland, and the subsequent CEF XReparentWindow couldn't anchor the CEF view inside the GTK host.
+
+5. **`cefMoveWindow()`** short-circuits on Wayland with a debug-log warning. Decision 3 (window positioning NO-OP on Wayland) is now implemented in code, not just docs.
+
+6. **`cefCreateBrowserInWidget()`** detects Wayland and dispatches to `cefCreateBrowserDetached()` instead. The detached path skips `gdk_x11_surface_get_xid`, `XReparentWindow`, and the X11 resize pump — CEF owns its own top-level Wayland window and the GTK4 host is a placeholder. Decision C15 records this as a known limitation; Phase 5+ replaces it with an xdg-foreign import path that asks the compositor to embed CEF's `wl_surface` into GTK4's `gtk_shell1` surface.
+
+**What's working today (Phase 5, opt-in)**:
+- Detection is automatic and reliable across X11 / Wayland sessions.
+- The runtime style flips correctly (Chrome on Wayland, Alloy on X11).
+- Window positioning is a graceful no-op on Wayland instead of a silent XMoveWindow that does nothing.
+- The CEF view creates and loads pages on Wayland (verified with `cef-hello`: `cefCreateBrowserDetached returned browser=true (CEF owns its own Wayland window)` + `OnLoadEnd status=200`).
+
+**What's NOT working (Phase 5 forward-looking)**:
+- The CEF view is a separate Wayland window, not embedded inside the GTK4 host. Phase 5 will add `xdg-foreign` (the `gtk_shell1` protocol) so GTK4 can import CEF's `wl_surface`.
+- `xfpm`/`wlr-layer-shell`/etc. compositors that don't honour the CEF surface's preferred size may show the CEF window at a default size; we have no surface-anchor protocol yet.
+- `SetPosition`/`Center` are no-ops on Wayland (by design). Apps that rely on absolute window placement will misbehave; this is documented in `webview_window_linux_cef.go::move`.
+
+**Test coverage** (`cef_wayland_linux_test.go`): 12 cases across 4 test functions cover the union-of-signals detection, the cache reset, the runtime-style selector, and case-insensitive matching. Tests must explicitly clear all three signals (the test env itself may have `WAYLAND_DISPLAY` / `XDG_SESSION_TYPE` set on a real Wayland workstation).
+
+### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
+
+**Context**: The CEF backend was missing the standard Linux lifecycle event surface: `events.Linux.ApplicationStartup` (→ `Common.ApplicationStarted`), `SystemWillSleep`/`SystemDidWake` (sleep/wake), `SystemThemeChanged` (→ `Common.ThemeChanged`), and per-window `WindowLoadStarted`/`WindowLoadFinished`/`WindowFocusIn`/`WindowFocusOut`. Apps subscribing to `events.Common.*` got nothing on CEF builds because:
+
+1. `events_common_linux.go` is `//go:build linux && !cef && !android && !server` — excluded from CEF.
+2. `application_linux_dbus.go` (logind power events, xdg portal theme) is the same tag.
+3. The `linuxApp.run()` method in `application_linux_cef.go` was a 4-line Phase-1 stub that never emitted `ApplicationStartup`.
+4. `listenForSystemThemeChangesCEF` existed but was an orphan function never invoked.
+5. `cef_load_handler.go` fired only `HandleMessage("wails:runtime:ready")` — no `WindowLoadFinished`.
+6. CEF itself has no focus signal; we needed a `GtkEventControllerFocus` like the WebKit backend's.
+
+**Decision**: Add a CEF-specific lifecycle file (`events_common_linux_cef.go`) that mirrors the WebKit backend's `events_common_linux.go` but selected via `//go:build linux && cgo && cef && !android && !server`. It exports:
+
+- `commonApplicationEventMapCEF` — the same Linux→Common event map the WebKit backend uses (ApplicationStartup→ApplicationStarted, SystemThemeChanged→ThemeChanged, SystemWillSleep, SystemDidWake). Verified by `TestCommonApplicationEventMapCEFCoverage` to catch drift between backends.
+- `setupCommonEvents` — registers forwarders that copy each Linux event's context into the corresponding Common event and pushes onto `applicationEvents`.
+- `monitorPowerEventsCEF` — subscribes to `org.freedesktop.login1.Manager.PrepareForSleep` on the **system** bus (the WebKit backend's `application_linux_dbus.go` is excluded from CEF; we re-implement it here so the CEF build doesn't lose sleep/wake). Probes `NameHasOwner` first so systemd-less distros don't hang.
+- `listenForSystemThemeChangesCEF` (now a method on `*linuxApp`) — subscribes to `org.freedesktop.portal.Settings.SettingChanged` on the session bus and emits `events.Linux.SystemThemeChanged`. Same `org.freedesktop.appearance::color-scheme` filter the WebKit backend uses.
+
+Wiring:
+- `linuxApp.run()` calls `setupCommonEvents`, `listenForSystemThemeChangesCEF`, and `monitorPowerEventsCEF` BEFORE `cefInit` (so listeners are registered before CEF can fire any callbacks). After `cefInit` succeeds and `markActivated`, a goroutine pushes `events.Linux.ApplicationStartup` onto `applicationEvents`. Going through the central pump means listeners can't block `appRun`.
+- `cef_load_handler.go` pushes `events.Linux.WindowLoadStarted` / `WindowLoadFinished` onto `windowEvents` from `OnLoadStart` / `OnLoadEnd` / `OnLoadingStateChange`. The existing `OnLoadEnd` → `HandleMessage("wails:runtime:ready")` is preserved.
+- `cefCreateHostWindow` (in `linux_cgo_cef.go`) installs a `GtkEventControllerFocus` via a new C helper `cef_install_focus_controller` (kept in pure C to avoid cgo `uintptr_t → gpointer` strictness). The C callbacks forward to `processWindowEvent` (also redefined here with `//export` so the C linker finds it; the WebKit backend's version in `linux_cgo.go` is excluded from CEF).
+
+`processWindowEvent` is reimplemented here with the same `//export processWindowEvent` + `C.uint` signature the WebKit backend uses, so the C linker finds the symbol from the same `extern` declaration in either build.
+
+**Rationale**:
+- The `Common.*` event surface is a cross-platform contract; CEF breaking it would silently break every app subscribing to `events.Common.ApplicationStarted`, etc. A coverage test pins the map.
+- Re-implementing `monitorPowerEventsCEF` and `listenForSystemThemeChangesCEF` in CEF-specific files (rather than refactoring the WebKit files into a shared helper) keeps the build tags clean — WebKit keeps `//go:build !cef`, CEF gets its own copy with no risk of breaking WebKit.
+- The focus controller has to live in C because GTK4's `g_signal_connect_data` requires a `gpointer` user-data parameter, and cgo's stricter `uintptr_t → gpointer` conversion rules bite us when wiring it from Go.
+- `processWindowEvent` lives in the lifecycle file rather than `linux_cgo_cef.go` because the WebKit backend's `linux_cgo.go` is excluded; CEF needs its own (with `//export`) and putting it next to `setupCommonEvents` keeps CEF-specific glue in one file.
 
 ## Implementation Phases
 
@@ -112,49 +307,51 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - [x] JS `setInterval`/`setTimeout` work
 - [x] CSS loading (Tailwind classes render)
 
-### Phase 3: IPC & Runtime (🔄 IN PROGRESS)
+### Phase 3: IPC & Runtime (✅ COMPLETE)
 
 - [x] V8 handler `wails_invoke` — synchronous Go ← JS calls via `HandleRuntimeCallWithIDs()`
 - [x] HTTP POST body + header forwarding from CEF → assetserver (enables the default fetch transport)
 - [x] Verified: bound methods work via HTTP POST (`Greeter.Hello("CEF")` → `"Hello CEF from Go!"`)
 - [x] Verified: System.Environment, Window.SetTitle via HTTP fetch work end-to-end
-- [ ] V8 extension context isolation (`window.wails.invoke` not accessible from CDP -- low priority, HTTP path works)
-- [ ] Async callback resolution (`wails_callback` — Go → JS push notifications, Promise resolve)
-- [ ] Event emission (`wails_emit` — Go → JS event dispatching)
-- [ ] Window management from JS (resize, close, minimize, maximize)
-- [ ] Application lifecycle hooks
-- [ ] Drag & drop file events
-- [ ] System dialogs (file open/save, alerts)
+- [x] V8 extension context isolation — The native bindings (`wails_invoke` and 7 others) live inside the IIFE that wraps `cef_js_shim.js`, so V8's lexical-scope rule hides them from page scripts (no `window.wails_invoke` ever exists). Three layers of defense-in-depth on the JS wrappers: input validation (rejects null/non-JSON payloads), an optional method allow-list (`Options.Security.AllowedMethods` restricts `Call.ByName(...)` to a known set while keeping built-in subsystems always permitted), and an optional per-navigation CSRF nonce (`Options.Security.EnforceCSRFNonce`, a 16-char hex token from `crypto/rand`) that the wrapper checks against `window._wails.cefNonce`. Default behavior unchanged when both are unset. See Decision C14.
+- [x] Async callback resolution — `wails_invokeAsync(callId, payload)` native function dispatches the runtime call to a goroutine (so V8 doesn't block on long-running service methods) and resolves the JS Promise via `frame.ExecuteJavaScript("window._wailsAndroidCallback(callId, response, error)")`. The `wails_callback` round-trip is also wired with a bounded ring buffer for future push-notification subscribers. See Decision C12.
+- [x] Event emission — Go → JS event dispatching via `DispatchWailsEvent` → `ExecJS` → `frame.ExecuteJavaScript`, triggered by `OnLoadEnd` signaling runtime-ready
+- [x] Window management from JS — `cefMaximiseWindow`, `cefMinimiseWindow`, `cefFullscreenWindow`, `cefMoveWindow` (X11), `cefSetResizable`, `cefSetDecorated`, `cefSetAlwaysOnTop` (X11), `cefGetWindowPosition`, `cefGetCurrentMonitorGeometry`, `cefIsMaximised`, `cefIsMinimised`, `cefIsFullscreen`, `cefIsFocused`, `cefIsVisible`. Verified end-to-end: Maximise/UnMaximise, SetSize, SetPosition, Center, ToggleFrameless, SetResizable all working via puppeteer CDP tests.
+- [x] Application lifecycle hooks — `events_common_linux_cef.go` re-implements the WebKit backend's lifecycle glue (`setupCommonEvents` + `monitorPowerEventsCEF` + `listenForSystemThemeChangesCEF`) so CEF exposes the same `events.Linux.ApplicationStartup` / `SystemWillSleep` / `SystemDidWake` / `SystemThemeChanged` events, plus per-window `WindowLoadStarted` / `WindowLoadFinished` from `cef_load_handler` and `WindowFocusIn` / `WindowFocusOut` from a GTK4 `GtkEventControllerFocus` installed by `cef_install_focus_controller`. All forward to their `Common.*` counterparts for cross-platform portability. See Decision C13.
+- [x] Drag & drop file events — `cef_drag_handler.go` captures `DragData` in `OnDragEnter` and a new `wails_cefResolveDrop(id, x, y)` native function (routed via `cef_v8_handler.go::handleCefResolveDrop`) returns the captured paths as JSON. The JS shim installs a capture-phase drop listener that forwards the paths to `_wails.handlePlatformFileDrop`, which fires `WindowFilesDropped` through the standard Wails runtime path. See Decision C11.
+- [x] System dialogs — `cefDialogHandler` (renderer-initiated `<input type="file">` deferred to Chromium native picker) and `cefJsdialogHandler` (alert/confirm/prompt deferred to Chromium, beforeunload allowed) wired into `cefClientStub`. Go-initiated file dialogs (`window.wails.Dialogs.OpenFile`/`SaveFile`) **disabled** because CEF's `CefBrowserHost::RunFileDialog` triggers SIGSEGV in single-process mode (Chromium V8/Mojo teardown path broken without subprocess isolation, see Decision C1).
 
-### Phase 4: Features & Polish (📋 PENDING)
+### Phase 4: Features & Polish (✅ COMPLETE)
 
-- [ ] Right-click context menu handler
-- [ ] DevTools hotkey (F12)
-- [ ] CEF auto-download runtime installer
-- [ ] Multi-process mode (resolve Mojo validation errors)
-- [ ] Window icon via CEF
-- [ ] Print handler
+- [x] Multi-window verified (2+ CEF browsers in single process)
+- [x] Right-click context menu handler — `cef_context_menu_handler.go` provides Back/Forward/Reload, clipboard, View Source, Print, Inspect Element
+- [x] DevTools hotkey (F12) — `cef_keyboard_handler.go` intercepts VK_F12 raw keydown
+- [x] CEF auto-download runtime installer — `scripts/download-cef.sh` downloads CEF 147 runtime to `~/.local/share/cef/`
+- [x] Multi-process mode investigated — **blocked by Go runtime incompatible with Chromium subprocess fork**. Mojo network service requires out-of-process rendering which conflicts with Go's inability to fork() after runtime.Main(). Documented in Decision C1.
+- [x] Window icon via CEF — **GTK4 limitation**: GTK4 removed `gtk_window_set_icon()`. Window icons in GTK4 are set via `.desktop` files. The `linuxApp.setIcon()` method is a no-op (matching the GTK4 WebKit backend behavior).
+- [x] Print handler — `cef_print_handler.go` wires `PrintHandler` into the client; `host.Print()` delegates to the native system print dialog
 
-### Phase 5: Wayland (📋 PENDING)
+### Phase 5: Wayland (🔄 PARTIAL — detached mode working, embedded via xdg-foreign pending)
 
-- [ ] Investigate Chrome runtime Ozone/Wayland support
-- [ ] CEF surface export via xdg-foreign
-- [ ] Test with GDK_BACKEND=wayland
-- [ ] Window positioning NO-OP on Wayland (Decision 3)
+- [x] Investigate Chrome runtime Ozone/Wayland support — CEF 147 has the Wayland Ozone platform built in (`ui/ozone/platform/wayland/host/`). Decision: switch to Chrome runtime + ozone-platform=wayland on Wayland sessions. See Decision C15.
+- [ ] CEF surface export via xdg-foreign — pending. The Wayland compositor must accept the gtk_shell1.set_parent request so GTK4 can import CEF's `wl_surface`. Currently the CEF view runs as a separate Wayland window (acceptable but not ideal).
+- [x] Test with GDK_BACKEND=wayland — verified end-to-end on a KDE/Wayland session. The demo opens a GTK4 host window; CEF creates its own Wayland window and loads `wails://localhost/`. `OnLoadEnd status=200` confirms the runtime fires. The XReparentWindow path is correctly bypassed via `cefCreateBrowserDetached`.
+- [x] Window positioning NO-OP on Wayland (Decision 3) — `cefMoveWindow()` and `linuxWebviewWindow.move()` both short-circuit on Wayland with a debug-log warning. The Wayland protocol has no XMoveWindow equivalent.
 
 ## Known Issues
 
 ### Critical
-- **Multi-process crashes**: Mozilla validation errors in `network.mojom.NetworkContext.1` deserialization when using `--no-zygote` without `--single-process`. Root cause: Go runtime state incompatible with Chromium subprocess fork.
+- **Multi-process blocked permanently**: Chromium's Mojo network service cannot run in-process after Go's runtime.Main(). The `--single-process` flag is mandatory. A separate CEF subprocess binary (non-Go) would be required for multi-process isolation.
 
 ### Medium
-- **No Wayland**: `XReparentWindow` is X11-only. Full Wayland support requires Chrome runtime + Ozone.
+- **Go-initiated file dialogs crash**: `CefBrowserHost::RunFileDialog` triggers SIGSEGV in single-process mode when the dialog is dismissed. Chromium V8/Mojo teardown path is broken without subprocess isolation. Renderer-initiated `<input type="file">` dialogs still work via `cefDialogHandler.OnFileDialog` returning 0 (Chromium handles natively).
+- **Wayland: CEF view is detached, not embedded**: On Wayland sessions the CEF browser runs as its own top-level Wayland window (Phase 5 / Decision C15). Embedding inside the GTK4 host requires the `gtk_shell1` xdg-foreign import protocol, which CEF 147's Chrome runtime doesn't expose. Phase 5+ will add xdg-foreign via a custom Wayland client.
 - **V8 Proxy resolver warning**: "Cannot use V8 Proxy resolver in single process mode." Not harmful but logged every startup.
 - **nvidia-drm warning**: `Should skip nVidia device named: nvidia-drm`. Not harmful.
 - **No user type filter warning**: For CEF built-in extension `cimiefiiaegbelhefglklhhakcgmhkai`. Not harmful.
 
 ### Low
-- **Deprecated X11 GDK functions**: `gdk_x11_display_get_xdisplay`, `gdk_x11_surface_get_xid` trigger compiler warnings. GTK4 marks them deprecated but no replacement exists for XReparentWindow workflow.
+- **Deprecated X11 GDK functions**: `gdk_x11_display_get_xdisplay`, `gdk_x11_surface_get_xid` trigger compiler warnings. GTK4 marks them deprecated but no replacement exists for XReparentWindow workflow. On Wayland sessions the X11 calls are skipped entirely via `cefCreateBrowserDetached`.
 
 ## Key Files
 
@@ -163,8 +360,22 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 | `v3/pkg/application/linux_cgo_cef.go` | CGo C code: X11 embedding, reparenting, idle pump, view tracking list |
 | `v3/pkg/application/cef_app_stub.go` | CefApp callbacks (OnRegisterCustomSchemes, OnBeforeCommandLineProcessing) |
 | `v3/pkg/application/cef_request_handler.go` | Resource request handler (wails:// scheme serving) |
+| `v3/pkg/application/cef_load_handler.go` | Load handler (OnLoadEnd → runtime-ready signal) |
+| `v3/pkg/application/cef_keyboard_handler.go` | Keyboard handler (F12 → openDevTools) |
+| `v3/pkg/application/cef_context_menu_handler.go` | Context menu handler (right-click menu) |
+| `v3/pkg/application/cef_print_handler.go` | Print handler (native print dialog) |
+| `v3/pkg/application/cef_dialog_handler.go` | DialogHandler (renderer-initiated `<input type="file">`) |
+| `v3/pkg/application/cef_drag_handler.go` | DragHandler — captures `DragData` on `OnDragEnter`, exposes paths via `wails_cefResolveDrop` (see Decision C11) |
+| `v3/pkg/application/cef_jsdialog_handler.go` | JsdialogHandler (alert/confirm/prompt/beforeunload) |
+| `v3/pkg/application/events_common_linux_cef.go` | CEF build's lifecycle glue: Linux→Common event mapping, sleep/wake (logind dbus), theme change (xdg portal), `processWindowEvent` C-callable forwarder (see Decision C13) |
+| `v3/pkg/application/cef_wayland_linux.go` | Wayland session detection (`detectWaylandSession`, `waylandRuntimeStyle`), runtime-style selector. See Decision C15. |
+| `v3/pkg/application/cef_wayland_linux_test.go` | 12 test cases covering union-of-signals detection, cache reset, case-insensitive matching, runtime-style selection. |
+| `v3/pkg/application/cef_js_shim.js` | V8 extension JS — declares `wails_*` native functions and installs the CEF drag-drop capture-phase drop handler |
+| `v3/pkg/application/dialogs_linux_cef_runtime.go` | CEF-build dialog stubs (Go-initiated file dialogs disabled) |
+| `v3/scripts/download-cef.sh` | CEF runtime auto-download script |
 | `v3/pkg/application/webview_window_linux_cef.go` | Go-level window creation, init sequence |
 | `v3/examples/cef-hello/main.go` | Minimal demo: card UI with gradient, timer, CDP test |
+| `v3/examples/cef-multiwin/main.go` | Multi-window demo: 2 CEF windows in same process |
 | `v3/examples/cef-shadcn-admin/main.go` | Full demo: shadcn/ui dashboard with SPA routing |
 
 ## Runtime Dependencies
@@ -174,6 +385,37 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 - `libvk_swiftshader.so`, `libEGL.so`, `libGLESv2.so` in runtime dir
 - X11 display (`DISPLAY`, `GDK_BACKEND=x11`)
 - GTK4, libX11
+
+## Verification Matrix
+
+End-to-end tests run via puppeteer-core against `http://127.0.0.1:9999/json` (CDP).
+
+| Capability | Verified | Method | Result |
+|---|---|---|---|
+| App boots | ✅ | process starts, DevTools port 9999 listening | 1 target detected |
+| Asset serving (`wails://`) | ✅ | `cef-hello` and `cef-shadcn-admin` render HTML | tailwind CSS classes apply |
+| Bound methods (`wails.Call`) | ✅ | `Greeter.Hello("CEF")` via HTTP POST | `"Hello CEF from Go!"` |
+| Bound methods (`Greeter.Add`) | ✅ | `Greeter.Add(3,7)` | `10` |
+| Async service methods | ✅ | `wails.Call.ByName("main.Greeter.SlowGreet", "CEF")` via `wails_invokeAsync` | Returns `"Hi CEF (async)"` ~2s later; V8 thread not blocked during the wait |
+| Go → JS events | ✅ | `app.Event.Emit("tick", ...)` × 11 over 25s | All received in JS |
+| Multi-window | ✅ | `cef-multiwin` opens 2 CEF browsers | Both have OnLoadEnd, both receive events |
+| DevTools port | ✅ | CDP `Page.captureScreenshot`, `Runtime.evaluate` | Working |
+| F12 DevTools | ✅ | `cef_keyboard_handler.go` intercepts VK_F12 | Window opens (built but not auto-tested) |
+| Maximise / UnMaximise | ✅ | `win.Maximise()` → state=max=true; `UnMaximise` → max=false | ✅ |
+| Resize | ✅ | `win.SetSize(1024, 768)` → `win.Size()` → `{1024, 768}` | ✅ |
+| Move | ✅ | `win.SetPosition(100, 100)` → `win.Position()` → `{100, 141}` (141 = titlebar) | ✅ |
+| Center | ✅ | `win.Center()` → `win.Position()` recalculated | ✅ |
+| ToggleFrameless | ✅ | `win.ToggleFrameless()` | ✅ |
+| SetResizable | ✅ | `win.SetResizable(false)`, `true` | ✅ |
+| SetAlwaysOnTop | ✅ | `win.SetAlwaysOnTop(true)` | ✅ |
+| IsMaximised / IsMinimised / IsFullscreen / IsFocused | ✅ | state queries reflect GTK state | ✅ |
+| Renderer-initiated `<input type="file">` | ✅ | cefDialogHandler returns 0 → Chromium native chooser | Working |
+| Application lifecycle events | ✅ | `app.Event.OnApplicationEvent(events.Common.ApplicationStarted, ...)` | Fires after `cefInit` succeeds; `events_common_linux_cef_test.go` pins the Linux→Common mapping |
+| Wayland session detection | ✅ | Run `cef-hello` on KDE/Wayland (default session) | Logs `post-init default display backend=wayland-0`; runtime flips to Chrome; CEF creates its own Wayland window |
+| Wayland: window positioning NO-OP | ✅ | Call `win.SetPosition(100, 100)` on Wayland | Debug log: `ignoring move to (100, 100): Wayland compositor owns placement`; position unchanged |
+| Wayland: embedded CEF view | ❌ | n/a | Phase 5 forward — needs `gtk_shell1` xdg-foreign import; CEF runs detached for now |
+| Go-initiated `Dialogs.OpenFile` / `SaveFile` | ❌ → graceful error | `RunFileDialog` SIGSEGV in single-process | Returns "not available in single-process mode" |
+| Message dialogs (Info/Warning/Error/Question) | ⚠ no-op | `linuxDialog.show` is empty | Modern apps use JS-side modals |
 
 ## Commits (feat/linux-cef branch)
 
@@ -186,4 +428,137 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 | 2026-07-10 | 06f969936 | fix(v3/cef): track CEF views via linked list and resize on idle pump |
 | 2026-07-10 | 30ccd0981 | feat(v3/cef): forward POST body and headers from CEF to assetserver |
 | 2026-07-10 | c6c5f3a1b | docs: update cef tracker - IPC verified working via HTTP fetch |
-| 2026-07-10 | (uncommitted) | Verified: bound method calls work (Greeter.Hello, Greeter.Add) |
+| 2026-07-11 | (uncommitted) | feat: implement OnLoadEnd handler for runtime-ready signal, verify Go→JS event dispatch |
+| 2026-07-11 | (uncommitted) | feat(v3/cef): F12 DevTools hotkey via cef_keyboard_handler.go |
+| 2026-07-11 | (uncommitted) | feat(v3/cef): right-click context menu via cef_context_menu_handler.go |
+| 2026-07-11 | (uncommitted) | feat(v3/cef): print handler via cef_print_handler.go |
+| 2026-07-11 | (uncommitted) | feat(v3/cef): system dialogs (DialogHandler + JsdialogHandler) |
+| 2026-07-11 | (uncommitted) | feat(scripts): download-cef.sh auto-download script |
+| 2026-07-11 | (uncommitted) | feat(v3/cef): window management from JS (X11 helpers + GTK4 wrappers) |
+
+---
+
+## Phase 6: Performance for raw-photo workloads (📋 PLANNED — 2026-07-11)
+
+**Context.** A future consumer of Wails CEF is a raw-photo developer where the canvas updates constantly (sliders, brush strokes, zoom, pan on a 24MP image) and must sustain 60+ FPS for interactive editing. Wails CEF's native-window embedding (X11 `XReparentWindow`) cannot hit that target on Wayland (no equivalent of `XReparentWindow`; see Decision C15). Off-screen rendering (OSR) — CEF paints into a BGRA buffer that we composite into a `GtkDrawingArea` — is the **only** way to truly embed CEF inside a GTK4 window on Wayland, but it carries an obligatory GPU→CPU readback on every frame that makes it unsuitable for the photo canvas itself (estimates below).
+
+**Honest perf budget (1920×1080, no HiDPI):**
+
+| Path | Frame time | Effective FPS | Use case |
+|---|---|---|---|
+| Native window + XReparentWindow (X11) | ~16ms | 60 | X11 only |
+| Detached window (Wayland current) | n/a | n/a | Browser opens in its own Wayland window |
+| OSR, no optimizations | ~30ms | 33 | UI only, low update rate |
+| OSR, optimized (Phase A) | ~20-25ms | 40-50 | UI panels, sidebars, dialogs |
+| Native GtkGLArea + GLSL (Phase B) | ~2-5ms | 200+ | **Photo canvas (60+ FPS easy)** |
+
+**Conclusion.** Wails CEF alone cannot deliver 60 FPS for raw-photo editing. The right architecture is **hybrid**: CEF for UI (which Phase A optimizes), native `GtkGLArea` for the canvas (Phase B). Zero-copy CEF→GL on Wayland requires a C++ custom subprocess (3+ months) and is out of scope.
+
+### Phase 6A — OSR optimized for UI (8-10 days)
+
+**Target:** 40-50 FPS at 1080p with input forwarding complete and zero GC pauses on the hot path. Suitable for UI panels, sidebars, dialogs, presets, histograms.
+
+**Tasks:**
+
+| ID | Task | Effort | Notes |
+|---|---|---|---|
+| A1 | Input forwarding (keyboard, mouse, wheel, focus, modifiers) | 3-4 d | GTK4 event controllers → `CefBrowserHost::SendKeyEvent` / `SendMouseMoveEvent` / `SendMouseWheelEvent` / `SetFocus`. XKB keycode → Windows VirtualKey translation table (subset: letters, digits, symbols, modifiers, F-keys, navigation). IME deferred (follow-up). |
+| A2 | Dirty rects (`OnPaint` second arg `dirtyRects`) | 2 d | Per-rect `cairo_rectangle` + `cairo_fill`. Save Cairo state across rects. |
+| A3 | Frame coalescing (multiple OnPaint → one GTK redraw per ~16ms) | 1 d | `g_idle_add_full` with throttling; tracks last redraw timestamp. |
+| A4 | Buffer pool + zero allocs in hot path | 1 d | Pre-grow `osrFrame.buffer` once; reuse on same-size paints. Verify with `go test -bench`. |
+| A5 | Resize storm handling | 1 d | Coalesce `WasResized` + `Invalidate`; one pending per idle tick. |
+| A6 | Cairo stride optimization | 1 d | Pad-aware stride; verify against gradient test for visual artifacts. |
+
+**Checkpoints:**
+- **A1:** mouse + keyboard work in `cef-hello`, captured with `puppeteer-core` `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`.
+- **A2:** 30% blit-time reduction on a 1080p redraw benchmark.
+- **A3:** 16ms minimum interval between successive `gtk_widget_queue_draw`.
+- **A5:** 5s window-corner drag yields 1 final resize, not 60+.
+
+### Phase 6B — `NativeCanvas` API for hybrid architecture (3-5 days)
+
+**Target:** Expose a `GtkGLArea` inside the same Wails window that hosts CEF. App code renders the photo canvas via standard `go-gl` / `vulkan-go`; CEF hosts the UI overlay.
+
+**API proposal (Go):**
+
+```go
+type NativeCanvas struct { /* ... */ }
+
+// AttachNativeCanvas creates a GtkGLArea inside the window. Returns
+// the existing canvas if already attached. The area fills the content
+// space; CEF is rendered either above (overlay) or below (background)
+// depending on z-order (currently: below CEF, so CEF is the overlay).
+func (w *linuxWebviewWindow) AttachNativeCanvas() *NativeCanvas
+
+// Detach removes the GL area. The window reverts to CEF-only mode.
+func (nc *NativeCanvas) Detach()
+
+// SetRenderCallback registers a per-frame render callback invoked on
+// the main thread. The state exposes the GL context, framebuffer size,
+// device-pixel-ratio. App code calls its GLSL pipeline here.
+func (nc *NativeCanvas) SetRenderCallback(cb func(state *NativeRenderState))
+
+// SetResizeCallback fires when the canvas is resized.
+func (nc *NativeCanvas) SetResizeCallback(cb func(w, h int))
+```
+
+**Tasks:**
+
+| ID | Task | Effort | Notes |
+|---|---|---|---|
+| B1 | Go API surface + tests | 1 d | Above signature. Tests for re-attach idempotency, Detach cleanup. |
+| B2 | C-side `cefAttachNativeCanvas` (GtkGLArea creation, render/resize hooks) | 1 d | `gtk_gl_area_set_render_func` + `gtk_gl_area_set_resize_func`. Z-order via `gtk_box_reorder_child`. |
+| B3 | Input router (mouse on GL area → callback; mouse on CEF → CEF) | 1 d | Per-widget `GtkEventControllerMotion`; consume event when over the GL area. |
+| B4 | Example: `v3/examples/cef-native-canvas-demo/` (triangle + texture upload) | 1 d | Uses `go-gl` to render a red triangle, demonstrates the API surface. |
+
+**Checkpoints:**
+- **B2:** `cef-native-canvas-demo` builds and shows a red triangle inside a GTK window that also has a CEF UI.
+- **B3:** hovering over the triangle does NOT trigger a CEF mouse event.
+
+### Phase 6D — Documentation (1 day, **done first**)
+
+**Target:** Anyone reading the codebase understands the performance budget and the hybrid pattern. No surprises.
+
+**Tasks:**
+
+| ID | Task | Effort |
+|---|---|---|
+| D1 | Update `CEF_IMPLEMENTATION.md` with Phase 6 plan + Decision C16/C17/C18 | included in this section |
+| D2 | ADR in `v3/docs/adr/0017-cef-osr-for-photo-canvas.md` | 1 d |
+| D3 | Update Verification Matrix with OSR FPS numbers | 1 d (combined with D1) |
+
+**Risks and mitigations:**
+
+| Risk | Mitigation |
+|---|---|
+| XKB → VirtualKey table is bigger than estimated (A1) | Ship subset with clear "unsupported keys warn" log; document as follow-up. |
+| Cairo optimizations introduce banding on gradients (A6) | Visual regression test against a known-good screenshot before/after. |
+| `GtkGLArea` + Wayland EGL bugs on Nvidia (B2) | Document "tested on Mesa/Intel only"; fail gracefully on detection. |
+| IME not in scope (A1) | Follow-up issue; explicit "not implemented" in docs. |
+
+**Out of scope:**
+
+- ❌ Zero-copy CEF→GL on Wayland (requires C++ custom subprocess, 3+ months)
+- ❌ Multi-touch input (CefBrowserHost::SendTouchEvent exists, not prioritized)
+- ❌ Drag-and-drop between CEF and NativeCanvas
+- ❌ Performance profiling on real photo workloads (the consumer's responsibility)
+
+**Timeline (15 working days, ~3 weeks of 1-2h sessions):**
+
+| Week | Phase | Deliverable |
+|---|---|---|
+| W1 (Mon-Tue) | D | Docs + ADR signed off |
+| W1 (Wed-Fri) | A1 | Input forwarding end-to-end demo |
+| W2 (Mon-Tue) | A2-A3 | Dirty rects + coalescing + benchmark |
+| W2 (Wed-Thu) | A4-A6 | Polish + all tests green |
+| W3 (Mon-Wed) | B1-B3 | NativeCanvas API + C setup + input router |
+| W3 (Thu-Fri) | B4 | Example builds, all tests green |
+
+**Open questions before kick-off:**
+
+1. Timeline acceptable? If shorter, A6 + B4 are the easiest to drop.
+2. Does the team have Go/CGo experience? They'll need to read the callbacks to extend.
+3. Test environment confirmed (`cef-hello` runs on their machine and renders content, not just an empty window)?
+4. Architecture B is the right escape hatch for their use case, or do they need a different model?
+
+If all green, kick off with D tomorrow.
