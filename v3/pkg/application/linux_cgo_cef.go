@@ -401,6 +401,37 @@ static void cef_install_focus_controller(GtkWidget *window, gpointer window_id) 
 		G_CALLBACK(cef_focus_leave_cb), window_id, NULL, 0);
 }
 
+// ── Window signal handlers ──────────────────────────────────────────
+
+// cef_close_request_cb is called when the user clicks the close button
+// or the WM sends a close request. It emits WindowDeleteEvent and
+// returns GDK_EVENT_PROPAGATE so GTK continues with the default close.
+static gboolean cef_close_request_cb(GtkWidget *widget, gpointer data) {
+	(void) widget;
+	processWindowEvent(GPOINTER_TO_UINT(data), 1056);
+	return GDK_EVENT_PROPAGATE;
+}
+
+// cef_window_state_notify_cb is called when the maximized or
+// fullscreened property changes. Emits WindowDidResize so the Wails
+// event system can react to the state transition.
+static void cef_window_state_notify_cb(GObject *obj, GParamSpec *pspec, gpointer data) {
+	(void) obj; (void) pspec;
+	processWindowEvent(GPOINTER_TO_UINT(data), 1078);
+}
+
+// cef_install_window_signal_handlers connects close-request and
+// window-state change signals on the given GtkWindow so that window
+// lifecycle events propagate to the Wails event bus.
+static void cef_install_window_signal_handlers(GtkWindow *window, gpointer window_id) {
+	g_signal_connect_data(window, "close-request",
+		G_CALLBACK(cef_close_request_cb), window_id, NULL, 0);
+	g_signal_connect_data(window, "notify::maximized",
+		G_CALLBACK(cef_window_state_notify_cb), window_id, NULL, 0);
+	g_signal_connect_data(window, "notify::fullscreened",
+		G_CALLBACK(cef_window_state_notify_cb), window_id, NULL, 0);
+}
+
 // -----------------------------------------------------------------------------
 // OSR (off-screen rendering) — C-side glue (Decision C16)
 // -----------------------------------------------------------------------------
@@ -767,6 +798,10 @@ func cefCreateHostWindow(application pointer, windowId uint) (window, vbox point
 	// windowId is an opaque C-side identifier (not a Go pointer), so
 	// the unsafe.Pointer intermediate is safe and intentional.
 	C.cef_install_focus_controller((*C.GtkWidget)(window), C.gpointer(unsafe.Pointer(uintptr(windowId))))
+
+	// Wire close-request and window-state change signals so
+	// WindowDeleteEvent / WindowDidResize propagate to Wails.
+	C.cef_install_window_signal_handlers((*C.GtkWindow)(window), C.gpointer(unsafe.Pointer(uintptr(windowId))))
 
 	return
 }

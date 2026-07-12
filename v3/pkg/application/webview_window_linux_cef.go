@@ -262,7 +262,11 @@ func (w *linuxWebviewWindow) print() error {
 // These will be filled out in Phase 4 (devtools/permisos/DnD/menu).
 
 func (w *linuxWebviewWindow) endDrag(button uint, x, y int)             {}
-func (w *linuxWebviewWindow) connectSignals()                            {}
+func (w *linuxWebviewWindow) connectSignals() {
+	// Signals are wired in cefCreateHostWindow via
+	// cef_install_window_signal_handlers (called from CGo preamble).
+	// This Go method exists for interface compatibility with WebKit.
+}
 func (w *linuxWebviewWindow) openContextMenu(menu *Menu, data *ContextMenuData) {}
 func (w *linuxWebviewWindow) isNormal() bool                             { return true }
 func (w *linuxWebviewWindow) setCloseButtonEnabled(enabled bool)        {}

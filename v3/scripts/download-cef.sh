@@ -64,6 +64,17 @@ if [ -d "${EXTRACTED}/Resources" ]; then
     rsync -a "${EXTRACTED}/Resources/" "${INSTALL_DIR}/Resources/"
 fi
 
+# CEF 147 requires v8_context_snapshot.bin in Resources/ and icudtl.dat
+# next to libcef.so. The build tree places both in Release/ by default.
+# See Decision C16 and cefEnsureFiles() for details.
+if [ -f "${EXTRACTED}/Release/v8_context_snapshot.bin" ]; then
+    mkdir -p "${INSTALL_DIR}/Resources"
+    cp -v "${EXTRACTED}/Release/v8_context_snapshot.bin" "${INSTALL_DIR}/Resources/v8_context_snapshot.bin"
+fi
+if [ -f "${EXTRACTED}/Release/icudtl.dat" ]; then
+    cp -v "${EXTRACTED}/Release/icudtl.dat" "${INSTALL_DIR}/icudtl.dat"
+fi
+
 # Also copy SwiftShader and other shared libraries
 for lib in libvk_swiftshader.so libEGL.so libGLESv2.so libvulkan.so.1; do
     found=$(find "${EXTRACTED}" -name "${lib}" -type f 2>/dev/null | head -1)
@@ -74,7 +85,13 @@ done
 
 echo "==> Verifying..."
 ls -la "${INSTALL_DIR}/libcef.so"
-file "${INSTALL_DIR}/libcef.so"
+for f in "${INSTALL_DIR}/Resources/v8_context_snapshot.bin" "${INSTALL_DIR}/icudtl.dat"; do
+    if [ -f "${f}" ]; then
+        echo "  OK: ${f}"
+    else
+        echo "  WARN: ${f} not found (CEF may fail at startup)"
+    fi
+done
 echo "==> CEF runtime installed to: ${INSTALL_DIR}"
 echo "==> Set CEF_DIR=${INSTALL_DIR} or activate the wails venv"
 echo "==> Done"
