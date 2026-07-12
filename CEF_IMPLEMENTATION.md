@@ -263,6 +263,99 @@ cef_dir/
 
 The ICU data file (`icudtl.dat`) must be present next to `libcef.so` (CEF issue #3778). The V8 context snapshot (`v8_context_snapshot.bin`) must be in the resources directory resolved by `PathService::Get(5)` — when `resources_dir_path` is set in `CefSettings`, this is the configured path.
 
+### Decision C17: Native C++ CEF helper for multi-process mode (PROPOSED 2026-07-12)
+
+**Context**: The current CEF host is a Go executable. With CEF's default Linux
+process model, the zygote is launched from that executable and later forks
+renderer/GPU/utility processes. A Go runtime must not be present in the zygote
+at the point Chromium performs that fork. Consequently the current Go-only
+implementation requires `--single-process`; attempting multi-process with
+`--no-zygote` produced Mojo deserialization failures.
+
+This is an architectural limitation of the current process topology, not a
+permanent CEF limitation. CEF supports a separate executable through
+`CefSettings.browser_subprocess_path` (exposed by purego-cef as
+`cef.Settings.BrowserSubprocessPath`).
+
+**Decision**: Replace the Go-only multi-process path with a small, separate
+`wails-cef-helper` executable written in C++ and linked against the *same* CEF
+binary distribution as the Go browser process. The helper must contain no Go
+runtime and no GTK application code. It owns only CEF child-process entry,
+renderer V8 bindings, and renderer-side CEF IPC.
+
+The browser process remains Go/Wails/GTK. It configures an absolute helper path
+before `cef.InitWithApp`, removes `single-process`, `in-process-gpu`, and the
+forced GPU-disable switches, then uses normal CEF renderer/GPU/utility process
+isolation.
+
+**Architecture**:
+
+```text
+frontend JavaScript
+        | V8 native functions
+        v
+wails-cef-helper (C++ renderer process; no Go)
+        | CefProcessMessage (requestId, browserId, frameId, payload)
+        v
+Wails Go browser process
+        | MessageProcessor and application services
+        v
+CEF process-message response -> helper -> JavaScript Promise
+```
+
+**Implementation requirements**:
+
+1. Build and package `wails-cef-helper` with CMake against the pinned CEF 147
+   headers and `libcef_dll_wrapper`; install it beside the application and
+   resolve `BrowserSubprocessPath` to an absolute, executable path.
+2. The helper `main()` must only create `CefMainArgs` and call
+   `CefExecuteProcess`. Its `CefApp` provides a `CefRenderProcessHandler` that
+   registers the `wails.cef` extension and translates its native V8 calls into
+   CEF process messages. It must not load Go code or call application services.
+3. Implement the request/response protocol before switching production flags:
+   all messages carry protocol version, browser ID, frame ID, request ID,
+   operation, and payload. Go rejects malformed, stale, or unexpected-frame
+   messages. Pending requests are cancelled when a frame navigates or closes.
+4. In Go, replace the empty `cefClientStub.OnProcessMessageReceived` with the
+   browser-side dispatcher. It invokes the existing `MessageProcessor` on a
+   background goroutine and returns success/error envelopes to the originating
+   renderer frame. Async is the default transport; synchronous invoke is only
+   a short-lived compatibility path.
+5. Migrate helper-dependent operations currently handled by
+   `cef_v8_handler.go`: async invoke/callback, console logging, flags and
+   environment injection, and file-drop path handoff. Preserve the existing
+   allow-list, nonce, and frame/window lifetime checks across the IPC boundary.
+6. Only after the isolated helper smoke test passes, remove single-process
+   switches and re-enable GPU. Do not use `--no-zygote` as a replacement for
+   the helper.
+
+**Validation gates**:
+
+- A standalone helper smoke test starts CEF without Go and confirms valid
+  zygote, renderer, GPU, and utility processes.
+- `cef-hello` runs without `--single-process`; a renderer crash does not
+  terminate the Go browser process.
+- Sync compatibility and concurrent async calls return the same Wails runtime
+  envelopes as the current transport; navigation and window close leave no
+  pending Promise or retained browser/frame reference.
+- Canvas/WebGL and GPU rendering are verified in a graphical X11/XWayland
+  session; `RunFileDialog` opens and dismisses without SIGSEGV.
+- Packaging verification runs from a clean directory with no development
+  `CEF_DIR`, checks helper permissions/path, and confirms clean shutdown with
+  no child-process zombies.
+
+**Rationale**:
+
+- It isolates Chromium's zygote fork from Go while preserving Go for all Wails
+  services and the browser host.
+- It uses CEF's intended process boundary instead of relying on unsupported
+  flag combinations.
+- The helper is intentionally narrow: no Wails business logic, GTK state, or
+  application data crosses into C++.
+
+**Status**: Proposed. The current single-process implementation remains the
+supported path until all validation gates pass.
+
 ### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
 
 **Context**: The CEF backend was missing the standard Linux lifecycle event surface: `events.Linux.ApplicationStartup` (→ `Common.ApplicationStarted`), `SystemWillSleep`/`SystemDidWake` (sleep/wake), `SystemThemeChanged` (→ `Common.ThemeChanged`), and per-window `WindowLoadStarted`/`WindowLoadFinished`/`WindowFocusIn`/`WindowFocusOut`. Apps subscribing to `events.Common.*` got nothing on CEF builds because:
@@ -341,7 +434,7 @@ Wiring:
 - [x] Right-click context menu handler — `cef_context_menu_handler.go` provides Back/Forward/Reload, clipboard, View Source, Print, Inspect Element
 - [x] DevTools hotkey (F12) — `cef_keyboard_handler.go` intercepts VK_F12 raw keydown
 - [x] CEF auto-download runtime installer — `scripts/download-cef.sh` downloads CEF 147 runtime to `~/.local/share/cef/`
-- [x] Multi-process mode investigated — **blocked by Go runtime incompatible with Chromium subprocess fork**. Mojo network service requires out-of-process rendering which conflicts with Go's inability to fork() after runtime.Main(). Documented in Decision C1.
+- [x] Multi-process mode investigated — unavailable in the current Go-only process topology. The supported remediation is a separate C++ CEF helper configured through `BrowserSubprocessPath`; it is proposed, not yet implemented (Decision C17).
 - [x] Window icon via CEF — **GTK4 limitation**: GTK4 removed `gtk_window_set_icon()`. Window icons in GTK4 are set via `.desktop` files. The `linuxApp.setIcon()` method is a no-op (matching the GTK4 WebKit backend behavior).
 - [x] Print handler — `cef_print_handler.go` wires `PrintHandler` into the client; `host.Print()` delegates to the native system print dialog
 
@@ -355,7 +448,7 @@ Wiring:
 ## Known Issues
 
 ### Critical
-- **Multi-process blocked permanently**: Chromium's Mojo network service cannot run in-process after Go's runtime.Main(). The `--single-process` flag is mandatory. A separate CEF subprocess binary (non-Go) would be required for multi-process isolation.
+- **Multi-process not implemented**: the Go-only host must keep `--single-process` until the proposed `wails-cef-helper` C++ executable and its CEF IPC bridge are implemented and validated (Decision C17). This is not a permanent CEF limitation.
 
 ### Medium
 - **Go-initiated file dialogs crash**: `CefBrowserHost::RunFileDialog` triggers SIGSEGV in single-process mode when the dialog is dismissed. Chromium V8/Mojo teardown path is broken without subprocess isolation. Renderer-initiated `<input type="file">` dialogs still work via `cefDialogHandler.OnFileDialog` returning 0 (Chromium handles natively).
