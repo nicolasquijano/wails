@@ -3,6 +3,7 @@
 package application
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"sync"
@@ -268,7 +269,7 @@ func (w *linuxWebviewWindow) connectSignals() {
 	// This Go method exists for interface compatibility with WebKit.
 }
 func (w *linuxWebviewWindow) openContextMenu(menu *Menu, data *ContextMenuData) {}
-func (w *linuxWebviewWindow) isNormal() bool                             { return true }
+func (w *linuxWebviewWindow) isNormal() bool                             { return !w.isMinimised() && !w.isMaximised() && !w.isFullscreen() }
 func (w *linuxWebviewWindow) setCloseButtonEnabled(enabled bool)        {}
 func (w *linuxWebviewWindow) setMinimiseButtonEnabled(enabled bool)     {}
 func (w *linuxWebviewWindow) setMaximiseButtonEnabled(enabled bool)      {}
@@ -453,9 +454,8 @@ func (w *linuxWebviewWindow) setHTML(html string) {
 	if frame == nil {
 		return
 	}
-	// Phase 2 will wire LoadString properly; for now we route through
-	// a data: URL via LoadURL to keep Phase 1 compiling.
-	frame.LoadURL("data:text/html;charset=utf-8," + html)
+	encoded := base64.StdEncoding.EncodeToString([]byte(html))
+	frame.LoadURL("data:text/html;charset=utf-8;base64," + encoded)
 }
 
 // isFullscreen / isMaximised / isMinimised / isVisible / isFocused
