@@ -433,7 +433,7 @@ static void cef_install_window_signal_handlers(GtkWindow *window, gpointer windo
 }
 
 
- */
+*/
 import "C"
 
 import (
@@ -530,6 +530,7 @@ func cefInit() error {
 	if resDir != "" {
 		locDir = filepath.Join(resDir, "locales")
 	}
+	multiProcess, helperPath := cefMultiProcessConfig()
 	cefSettings = cef.Settings{
 		MultiThreadedMessageLoop: false, // We pump manually from GTK loop.
 		ExternalMessagePump:      true,
@@ -538,6 +539,12 @@ func cefInit() error {
 		LogFile:                  "/tmp/wails-cef.log",
 		ResourcesDirPath:         resDir,
 		LocalesDirPath:           locDir,
+	}
+	if multiProcess {
+		cefSettings.BrowserSubprocessPath = helperPath
+		debugLog("[cefInit] multi-process enabled with helper %s", helperPath)
+	} else if os.Getenv("WAILS_CEF_MULTIPROCESS") != "" {
+		debugLog("[cefInit] multi-process requested but wails-cef-helper is unavailable; using single-process")
 	}
 
 	// Build the CefApp that injects the Chromium command-line switches
@@ -1129,5 +1136,3 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 // UI thread directly — instead bounce through InvokeAsync so they
 // run on the CEF UI thread (which is the main thread in single-process
 // mode but the contract is the same either way).
-
-

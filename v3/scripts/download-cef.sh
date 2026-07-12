@@ -11,6 +11,8 @@ set -euo pipefail
 
 CEF_VERSION="${CEF_VERSION:-147}"
 INSTALL_DIR="${CEF_DIR:-$HOME/.local/share/cef}"
+SDK_DIR="${INSTALL_DIR}/sdk"
+HELPER_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../pkg/application/cef_helper" && pwd)"
 
 # Spotify's CEF build mirrors (adjust URL format per version)
 # Format: https://cef-builds.spotifycdn.com/cef_builds/CEF_VERSION/cef_binary_VERSION_linux64.tar.xz
@@ -31,8 +33,8 @@ DOWNLOAD_URL="https://cef-builds.spotifycdn.com/cef_builds/cef_147.0.0+ge0c1f2c+
 echo "==> Installing CEF ${CEF_VERSION} runtime to: ${INSTALL_DIR}"
 mkdir -p "${INSTALL_DIR}"
 
-if [ -f "${INSTALL_DIR}/libcef.so" ]; then
-    echo "==> CEF runtime already present at ${INSTALL_DIR}/libcef.so (delete to re-download)"
+if [ -f "${INSTALL_DIR}/libcef.so" ] && [ -x "${INSTALL_DIR}/wails-cef-helper" ]; then
+    echo "==> CEF runtime and multi-process helper already present at ${INSTALL_DIR}"
     ldd "${INSTALL_DIR}/libcef.so" | head -5
     echo "==> Done"
     exit 0
@@ -57,7 +59,7 @@ fi
 
 echo "==> Found extracted build: $(basename "${EXTRACTED}")"
 
-# Copy runtime files: libcef.so, Resources, locales, SwiftShader
+# Copy runtime files: libcef.so, Resources, locales, SwiftShader.
 cp -v "${EXTRACTED}/Release/libcef.so" "${INSTALL_DIR}/libcef.so"
 
 if [ -d "${EXTRACTED}/Resources" ]; then
@@ -83,8 +85,27 @@ for lib in libvk_swiftshader.so libEGL.so libGLESv2.so libvulkan.so.1; do
     fi
 done
 
+# Preserve the minimal development tree required to build the native helper.
+# The helper must be compiled from the same CEF binary distribution as the
+# runtime; headers from a distro package or a different CEF release are not
+# ABI-safe. Keep this under CEF_DIR so packaged builds have one provenance.
+mkdir -p "${SDK_DIR}/Release"
+for path in CMakeLists.txt cmake include libcef_dll; do
+    if [ -e "${EXTRACTED}/${path}" ]; then
+        rsync -a "${EXTRACTED}/${path}" "${SDK_DIR}/"
+    fi
+done
+cp -v "${EXTRACTED}/Release/libcef.so" "${SDK_DIR}/Release/libcef.so"
+
+echo "==> Building native CEF subprocess helper..."
+cmake -S "${HELPER_SOURCE}" -B "${TMPDIR}/helper-build" -DCEF_ROOT="${SDK_DIR}" -DCMAKE_BUILD_TYPE=Release
+cmake --build "${TMPDIR}/helper-build" --parallel
+cmake --install "${TMPDIR}/helper-build" --prefix "${INSTALL_DIR}"
+chmod 0755 "${INSTALL_DIR}/wails-cef-helper"
+
 echo "==> Verifying..."
 ls -la "${INSTALL_DIR}/libcef.so"
+test -x "${INSTALL_DIR}/wails-cef-helper"
 for f in "${INSTALL_DIR}/Resources/v8_context_snapshot.bin" "${INSTALL_DIR}/icudtl.dat"; do
     if [ -f "${f}" ]; then
         echo "  OK: ${f}"

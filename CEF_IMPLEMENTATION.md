@@ -353,8 +353,24 @@ CEF process-message response -> helper -> JavaScript Promise
 - The helper is intentionally narrow: no Wails business logic, GTK state, or
   application data crosses into C++.
 
-**Status**: Proposed. The current single-process implementation remains the
-supported path until all validation gates pass.
+**Implementation status (2026-07-12)**: In progress. The repository now
+contains `v3/pkg/application/cef_helper/`, a C++20 helper compiled against the
+pinned CEF SDK, plus a browser-side async process-message bridge in
+`cef_multiprocess_ipc.go`. `v3/scripts/download-cef.sh` preserves the matching
+CEF SDK under `CEF_DIR/sdk` and builds/installs `wails-cef-helper` beside
+`libcef.so`.
+
+Multi-process is deliberately opt-in during validation:
+
+```bash
+WAILS_CEF_MULTIPROCESS=1 go run -tags cef ./examples/cef-hello
+```
+
+The host only enables it when an executable helper is found through
+`WAILS_CEF_HELPER`, beside the application executable, or beside `libcef.so`.
+Otherwise it retains the tested single-process fallback. The remaining gates
+are graphical smoke tests, renderer-crash isolation, complete migration of
+all renderer-only bindings, and GPU/dialog validation.
 
 ### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
 

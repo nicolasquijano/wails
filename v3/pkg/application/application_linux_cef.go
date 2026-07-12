@@ -297,10 +297,11 @@ func newPlatformApp(parent *App) *linuxApp {
 	// hardening knobs into every V8 context. See Decision C14.
 	setCefSecurityOptions(parent)
 
-	// Install the V8 extension BEFORE any browser is created. CEF only
-	// loads extensions that were registered before the browser's
-	// render process started.
-	registerCEFExtension()
+	// In multi-process mode the C++ helper owns the renderer-only V8
+	// extension. The Go extension is for the single-process fallback.
+	if enabled, _ := cefMultiProcessConfig(); !enabled {
+		registerCEFExtension()
+	}
 
 	// Register the "wails" custom scheme so CEF recognises wails://
 	// URLs as valid (otherwise the browser shows a blank page because

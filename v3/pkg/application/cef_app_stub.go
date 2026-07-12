@@ -134,18 +134,20 @@ type cefWailsApp struct{}
 //   - --enable-features=UseOzonePlatform: required so the runtime-style
 //     flag actually selects Ozone.
 //
-// Single-process + disable-gpu are unconditional: they're orthogonal
-// to the display server (forced by the Go-runtime / fork limitation,
-// see Decision C1).
+// Single-process + disable-gpu are the safe fallback. When an installed C++
+// helper is explicitly enabled, Chromium uses normal child processes instead
+// (see Decision C17).
 func (a *cefWailsApp) OnBeforeCommandLineProcessing(processType string, commandLine cef.CommandLine) {
 	if commandLine == nil {
 		return
 	}
 	commandLine.AppendSwitchWithValue("ozone-platform", "x11")
 	commandLine.AppendSwitchWithValue("runtime-style", "alloy")
-	commandLine.AppendSwitch("disable-gpu")
-	commandLine.AppendSwitch("in-process-gpu")
-	commandLine.AppendSwitch("single-process")
+	if enabled, _ := cefMultiProcessConfig(); !enabled {
+		commandLine.AppendSwitch("disable-gpu")
+		commandLine.AppendSwitch("in-process-gpu")
+		commandLine.AppendSwitch("single-process")
+	}
 	commandLine.AppendSwitchWithValue("lang", "en-US")
 	commandLine.AppendSwitchWithValue("remote-debugging-port", "9999")
 
@@ -181,4 +183,4 @@ func (a *cefWailsApp) OnRegisterCustomSchemes(registrar cef.SchemeRegistrar) {
 }
 func (a *cefWailsApp) GetResourceBundleHandler() cef.ResourceBundleHandler { return nil }
 func (a *cefWailsApp) GetBrowserProcessHandler() cef.BrowserProcessHandler { return nil }
-func (a *cefWailsApp) GetRenderProcessHandler() cef.RenderProcessHandler  { return nil }
+func (a *cefWailsApp) GetRenderProcessHandler() cef.RenderProcessHandler   { return nil }
