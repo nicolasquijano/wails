@@ -613,6 +613,10 @@ func cefInit() error {
 		debugLog("[cefInit] post-init no default display")
 	}
 
+	// Ensure required CEF data files are in the right places before
+	// CEF tries to load them (v8_context_snapshot.bin, icudtl.dat).
+	cefEnsureFiles()
+
 	resDir := cefResourcesDir()
 	locDir := ""
 	if resDir != "" {

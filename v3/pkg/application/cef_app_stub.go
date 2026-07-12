@@ -3,6 +3,7 @@
 package application
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 
@@ -11,22 +12,85 @@ import (
 
 // cefResourcesDir returns the path to the CEF Resources directory,
 // mirroring the logic in purego-cef's loader.resolveDir().
-func cefResourcesDir() string {
-	dir := ""
+func cefDir() string {
 	if env := os.Getenv("CEF_DIR"); env != "" {
-		dir = env
-	} else if _, err := os.Stat("/usr/lib/cef/libcef.so"); err == nil {
-		dir = "/usr/lib/cef"
-	} else {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			dir = filepath.Join(home, ".local", "share", "cef")
+		return env
+	}
+	if _, err := os.Stat("/usr/lib/cef/libcef.so"); err == nil {
+		return "/usr/lib/cef"
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".local", "share", "cef", "libcef.so")); err == nil {
+			return filepath.Join(home, ".local", "share", "cef")
 		}
 	}
-	if dir == "" {
-		return ""
+	return ""
+}
+
+func cefResourcesDir() string {
+	if dir := cefDir(); dir != "" {
+		return filepath.Join(dir, "Resources")
 	}
-	return filepath.Join(dir, "Resources")
+	return ""
+}
+
+// cefEnsureFiles copies required CEF data files that CEF's internal
+// path resolution may not find. Called once during cefInit.
+func cefEnsureFiles() {
+	dir := cefDir()
+	if dir == "" {
+		return
+	}
+	resDir := filepath.Join(dir, "Resources")
+	releaseDir := filepath.Join(dir, "Release")
+
+	// v8_context_snapshot.bin must exist in Resources/ for
+	// PathService::Get(5) + "v8_context_snapshot.bin" to succeed.
+	srcV8 := filepath.Join(releaseDir, "v8_context_snapshot.bin")
+	dstV8 := filepath.Join(resDir, "v8_context_snapshot.bin")
+	if _, err := os.Stat(srcV8); err == nil {
+		if _, err := os.Stat(dstV8); os.IsNotExist(err) {
+			if err := copyFile(srcV8, dstV8); err != nil {
+				debugLog("[cefEnsureFiles] copy v8 snapshot: %v", err)
+			} else {
+				debugLog("[cefEnsureFiles] copied v8_context_snapshot.bin to Resources/")
+			}
+		}
+	}
+
+	// icudtl.dat must be next to libcef.so (CEF issue #3778).
+	// CEF resolves the libcef.so path at runtime via FILE_GetModulePath,
+	// which returns the resolved path (Release/) for a symlink. However
+	// the CEF_DIR env var may point to the symlink parent. Copy to both.
+	srcICU := filepath.Join(resDir, "icudtl.dat")
+	for _, candidate := range []string{dir, filepath.Join(dir, "Release")} {
+		dstICU := filepath.Join(candidate, "icudtl.dat")
+		if _, err := os.Stat(srcICU); err == nil {
+			if _, err := os.Stat(dstICU); os.IsNotExist(err) {
+				if err := copyFile(srcICU, dstICU); err != nil {
+					debugLog("[cefEnsureFiles] copy icudtl to %s: %v", candidate, err)
+				} else {
+					debugLog("[cefEnsureFiles] copied icudtl.dat to %s", candidate)
+				}
+			}
+		}
+	}
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // cefWailsApp implements cef.App. CEF calls OnBeforeCommandLineProcessing
