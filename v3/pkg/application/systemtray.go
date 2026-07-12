@@ -171,7 +171,17 @@ func (s *SystemTray) ToggleWindow() {
 	} else {
 		s.attachedWindow.hasBeenShown = true
 		_ = s.PositionWindow(s.attachedWindow.Window, s.attachedWindow.Offset)
-		s.attachedWindow.Window.Show().Focus()
+		// Only call Focus() on the first show. On focus-follows-mouse
+		// compositors (Hyprland, Sway) Focus() warps the cursor to the
+		// window center, which is jarring when the user re-clicks the
+		// systray icon expecting the window to reappear in place.
+		// Subsequent toggles skip Focus() — Show() alone is enough
+		// since the user is interacting with the systray anyway.
+		if !s.attachedWindow.hasBeenShown || s.attachedWindow.Window.IsFocused() {
+			s.attachedWindow.Window.Show().Focus()
+		} else {
+			s.attachedWindow.Window.Show()
+		}
 	}
 }
 

@@ -747,7 +747,12 @@ func (a *App) handleDragAndDropMessage(event *dragAndDropMessage) {
 	window, ok := a.windows[event.windowId]
 	a.windowsLock.Unlock()
 	if !ok {
-		a.warning("WebviewWindow #%d not found", event.windowId)
+		a.shutdownLock.Lock()
+		shuttingDown := a.performingShutdown
+		a.shutdownLock.Unlock()
+		if !shuttingDown {
+			a.warning("WebviewWindow #%d not found", event.windowId)
+		}
 		return
 	}
 	window.handleDragAndDropMessage(event.filenames, event.DropTarget)
@@ -768,7 +773,12 @@ func (a *App) handleWindowMessage(event *windowMessage) {
 	a.debug("handleWindowMessage: Looking for window", "windowId", event.windowId, "availableIDs", ids)
 
 	if !ok {
-		a.warning("WebviewWindow #%d not found", event.windowId)
+		a.shutdownLock.Lock()
+		shuttingDown := a.performingShutdown
+		a.shutdownLock.Unlock()
+		if !shuttingDown {
+			a.warning("WebviewWindow #%d not found", event.windowId)
+		}
 		return
 	}
 	// Check if the message starts with "wails:"
@@ -794,12 +804,19 @@ func (a *App) handleWebViewRequest(request *webViewAssetRequest) {
 
 func (a *App) handleWindowEvent(event *windowEvent) {
 	defer handlePanic()
-	// Get window from window map
 	a.windowsLock.RLock()
 	window, ok := a.windows[event.WindowID]
 	a.windowsLock.RUnlock()
 	if !ok {
-		a.warning("Window #%d not found", event.WindowID)
+		// Benign race during shutdown: window events queued before
+		// destroy() clears a.windows may arrive after the map is
+		// nil'd. Don't warn — it's expected.
+		a.shutdownLock.Lock()
+		shuttingDown := a.performingShutdown
+		a.shutdownLock.Unlock()
+		if !shuttingDown {
+			a.warning("Window #%d not found", event.WindowID)
+		}
 		return
 	}
 	window.HandleWindowEvent(event.EventID)
@@ -928,15 +945,18 @@ func (a *App) runOrDeferToAppRun(r runnable) {
 
 func (a *App) handleWindowKeyEvent(event *windowKeyEvent) {
 	defer handlePanic()
-	// Get window from window map
 	a.windowsLock.RLock()
 	window, ok := a.windows[event.windowId]
 	a.windowsLock.RUnlock()
 	if !ok {
-		a.warning("WebviewWindow #%d not found", event.windowId)
+		a.shutdownLock.Lock()
+		shuttingDown := a.performingShutdown
+		a.shutdownLock.Unlock()
+		if !shuttingDown {
+			a.warning("WebviewWindow #%d not found", event.windowId)
+		}
 		return
 	}
-	// Get callback from window
 	window.HandleKeyEvent(event.acceleratorString)
 }
 

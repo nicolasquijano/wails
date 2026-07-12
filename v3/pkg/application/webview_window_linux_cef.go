@@ -503,16 +503,6 @@ func (w *linuxWebviewWindow) unfullscreen() {
 	cefUnmaximiseWindow(w.window)
 }
 func (w *linuxWebviewWindow) move(x, y int) {
-	// On Wayland, the compositor owns window placement and explicit
-	// SetPosition / move() calls are rejected (or silently ignored,
-	// depending on the compositor). The Wayland protocol has no
-	// equivalent of X11's XMoveWindow; the only valid position
-	// requests are interactive (drag) and shell-side decoration
-	// defaults. Decision C15 records this no-op.
-	if isOnWayland() {
-		debugLog("[linuxWebviewWindow.move] ignoring move to (%d, %d): Wayland compositor owns placement", x, y)
-		return
-	}
 	cefMoveWindow(w.window, x, y)
 }
 func (w *linuxWebviewWindow) present()      { cefPresentWindow(w.window) }

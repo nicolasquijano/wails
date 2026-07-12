@@ -6,6 +6,8 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 
 **Current status (2026-07-11)**: All four phases complete. CEF embedding, basic app support, IPC/runtime, and features/polish all implemented. Window management from JS verified end-to-end via puppeteer CDP. System dialogs wired with graceful fallback (renderer-initiated works, Go-initiated disabled due to single-process SIGSEGV — see Decision C10). Three working demos: `cef-hello`, `cef-multiwin`, `cef-shadcn-admin`.
 
+**Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready — no upstream framework (Electron, Energy, etc.) ships it. The detached-window approach created an unresponsive GTK host window. All CEF builds now force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
+
 **Build tag**: `cef` (e.g. `go build -tags cef`). Cannot be combined with the WebKit build tags (`gtk3`).
 
 ## Architecture Decisions
@@ -208,46 +210,58 @@ A DevTools user can always read `window._wails.cefNonce` and pass it on; the non
 - `appendJSQuoted` handles the C0/quote/backslash escapes a random nonce might need (tested with `TestAppendJSQuoted`).
 - The wrapper uses `indexOf` (not `Array.includes`) on the JSON array literal because V8's Array.prototype.includes wasn't always available across the Chromium versions we support; `indexOf` is universally available.
 
-### Decision C15: Wayland support (Phase 5) (2026-07-11)
+### Decision C15: Wayland support (Phase 5) — SUPERSEDED by C16 (2026-07-12)
 
-**Context**: Phase 5 of the plan calls for native Wayland support. CEF 147 ships with Ozone/Wayland in `libcef.so` (the wayland host is at `ui/ozone/platform/wayland/host/` per the binary's `strings` output) but the Alloy runtime — which the Wails CEF backend used pre-Phase-5 — has no Wayland surface implementation. To support Wayland we need to:
+**Context**: Phase 5 attempted native Wayland support. CEF 147 ships with Ozone/Wayland in `libcef.so` but the Alloy runtime has no Wayland surface implementation. The Chrome runtime + Ozone/Wayland path was prototyped but produced a detached CEF window (not embedded in the GTK4 host).
 
-1. Detect Wayland sessions (env: `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `GDK_BACKEND`).
-2. Switch CEF's Ozone platform and runtime style based on the detected backend.
-3. Avoid the X11-only paths (`XReparentWindow`, `gdk_x11_surface_get_xid`, `gdk_set_allowed_backends("x11")`) on Wayland — these crash with NULL-deref or silently produce detached X11 windows under XWayland.
-4. Document the limitation: Wayland compositors don't honour explicit window placement, so `move()`/`SetPosition()`/`center()` become no-ops.
+**Decision (original, now superseded)**: 
+1. Detect Wayland sessions via union of `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `GDK_BACKEND`.
+2. Switch CEF to Chrome runtime + Ozone/Wayland on Wayland.
+3. Create browser detached (`cefCreateBrowserDetached`) — CEF owns its own top-level Wayland surface.
+4. Window positioning becomes a no-op on Wayland.
 
-**Decision**:
+**Superseded by Decision C16**: Wayland is not production-ready; reverted to X11-only.
 
-1. **`detectWaylandSession()`** (in `cef_wayland_linux.go`) returns true if any of `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, or `GDK_BACKEND` indicates Wayland. The result is cached after first read — `resetWaylandDetection()` is exposed for tests. Three signals matter because:
-   - `WAYLAND_DISPLAY` is the canonical signal but is unset in containers / ssh sessions.
-   - `XDG_SESSION_TYPE=wayland` survives shells that lose `WAYLAND_DISPLAY`.
-   - `GDK_BACKEND=wayland` is the explicit opt-in (force Wayland even when neither env var is set).
+### Decision C16: X11-only — Wayland dropped (2026-07-12)
 
-2. **`cef_app_stub.go::OnBeforeCommandLineProcessing`** now branches:
-   - **X11**: `--ozone-platform=x11 --runtime-style=alloy` (unchanged).
-   - **Wayland**: `--ozone-platform=wayland --runtime-style=chrome --enable-features=UseOzonePlatform`. The Chrome runtime is required because Alloy cannot create a Wayland surface.
+**Context**: Phase 5 (Decision C15) added Wayland support via Chrome runtime + Ozone/Wayland with detached browser windows. Testing revealed two critical problems:
 
-3. **`init()` in `application_linux_cef.go`** no longer forces `GDK_BACKEND=x11` / `OZONE_PLATFORM=x11` on Wayland sessions. The original "force X11" logic was the pre-Phase-5 answer to "the CEF XReparentWindow path needs X11"; with the new detached-Wayland path that pressure is gone.
+1. **Separate window, not embedded**: CEF creates its own top-level Wayland surface via Ozone/Wayland. The GTK4 host window is a placeholder — the CEF view is a separate window the user must find and interact with independently. The xdg-foreign protocol (required to embed one Wayland surface into another) is not exposed by CEF 147's Chrome runtime.
 
-4. **`cefInit()` in `linux_cgo_cef.go`** calls `gdk_set_allowed_backends` with `"wayland"` on Wayland and `"x11"` on X11. This was the source of the user-reported "transparent X11 window" bug: locking GTK to X11 on a Wayland session forced GTK through XWayland, and the subsequent CEF XReparentWindow couldn't anchor the CEF view inside the GTK host.
+2. **No upstream framework ships it**: Electron does not ship Ozone/Wayland by default (requires `--ozone-platform-hint=auto` and still has known issues). Energy framework explicitly states "Currently, under Linux, only x11 can be used, and Wayland cannot be used yet." No production desktop framework uses CEF on native Wayland.
 
-5. **`cefMoveWindow()`** short-circuits on Wayland with a debug-log warning. Decision 3 (window positioning NO-OP on Wayland) is now implemented in code, not just docs.
+3. **V8 startup snapshot on Wayland**: CEF 147 on Wayland requires `v8_context_snapshot.bin` in the resources directory (`Resources/`). The build-tree layout of our CEF 147 installation doesn't place it there by default — manual copy required. This was fixed by copying the file from `Release/` to `Resources/`.
 
-6. **`cefCreateBrowserInWidget()`** detects Wayland and dispatches to `cefCreateBrowserDetached()` instead. The detached path skips `gdk_x11_surface_get_xid`, `XReparentWindow`, and the X11 resize pump — CEF owns its own top-level Wayland window and the GTK4 host is a placeholder. Decision C15 records this as a known limitation; Phase 5+ replaces it with an xdg-foreign import path that asks the compositor to embed CEF's `wl_surface` into GTK4's `gtk_shell1` surface.
+**Decision**: Revert to X11-only for all CEF builds. On Wayland sessions, force `GDK_BACKEND=x11` and `--ozone-platform=x11` so GTK+CEF operate through XWayland. The changes:
 
-**What's working today (Phase 5, opt-in)**:
-- Detection is automatic and reliable across X11 / Wayland sessions.
-- The runtime style flips correctly (Chrome on Wayland, Alloy on X11).
-- Window positioning is a graceful no-op on Wayland instead of a silent XMoveWindow that does nothing.
-- The CEF view creates and loads pages on Wayland (verified with `cef-hello`: `cefCreateBrowserDetached returned browser=true (CEF owns its own Wayland window)` + `OnLoadEnd status=200`).
+| File | Change |
+|------|--------|
+| `application_linux_cef.go::init()` | Always force `GDK_BACKEND=x11`, `OZONE_PLATFORM=x11`, unset `WAYLAND_DISPLAY` |
+| `linux_cgo_cef.go::cefInit()` | Always call `gdk_set_allowed_backends("x11")` before `gtk_init()` |
+| `linux_cgo_cef.go::cefCreateBrowserInWidget()` | Remove Wayland branch; always use X11 reparenting path |
+| `linux_cgo_cef.go::cefMoveWindow()` | Remove Wayland short-circuit |
+| `cef_app_stub.go::OnBeforeCommandLineProcessing` | Remove Wayland branch; always `--ozone-platform=x11 --runtime-style=alloy` |
+| `webview_window_linux_cef.go::move()` | Remove Wayland short-circuit |
 
-**What's NOT working (Phase 5 forward-looking)**:
-- The CEF view is a separate Wayland window, not embedded inside the GTK4 host. Phase 5 will add `xdg-foreign` (the `gtk_shell1` protocol) so GTK4 can import CEF's `wl_surface`.
-- `xfpm`/`wlr-layer-shell`/etc. compositors that don't honour the CEF surface's preferred size may show the CEF window at a default size; we have no surface-anchor protocol yet.
-- `SetPosition`/`Center` are no-ops on Wayland (by design). Apps that rely on absolute window placement will misbehave; this is documented in `webview_window_linux_cef.go::move`.
+**Rationale**:
+- `XReparentWindow` embedding works reliably under XWayland on any modern Wayland compositor (KDE, GNOME, Hyprland, Sway).
+- The user's session has `DISPLAY=:1` (XWayland) available, which is sufficient.
+- The detached-window approach (Phase 5) produced a blank/unresponsive GTK host window; embedding via XWayland produces a single window with correct CEF content.
+- CEF 147's Wayland Ozone backend may mature in future versions; this decision can be revisited when an upstream framework demonstrates working CEF+Wayland in production.
 
-**Test coverage** (`cef_wayland_linux_test.go`): 12 cases across 4 test functions cover the union-of-signals detection, the cache reset, the runtime-style selector, and case-insensitive matching. Tests must explicitly clear all three signals (the test env itself may have `WAYLAND_DISPLAY` / `XDG_SESSION_TYPE` set on a real Wayland workstation).
+**File requirements on disk** (beyond libcef.so):
+```
+cef_dir/
+├── icudtl.dat                          # next to libcef.so  (FATAL without)
+├── v8_context_snapshot.bin             # in Resources/       (FATAL without)
+├── chrome_100_percent.pak              # in Resources/
+├── chrome_200_percent.pak              # in Resources/
+├── resources.pak                       # in Resources/
+├── locales/en-US.pak (and others)      # in Resources/locales/
+└── libEGL.so, libGLESv2.so            # in Release/ (used via LD_LIBRARY_PATH)
+```
+
+The ICU data file (`icudtl.dat`) must be present next to `libcef.so` (CEF issue #3778). The V8 context snapshot (`v8_context_snapshot.bin`) must be in the resources directory resolved by `PathService::Get(5)` — when `resources_dir_path` is set in `CefSettings`, this is the configured path.
 
 ### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
 
@@ -331,12 +345,12 @@ Wiring:
 - [x] Window icon via CEF — **GTK4 limitation**: GTK4 removed `gtk_window_set_icon()`. Window icons in GTK4 are set via `.desktop` files. The `linuxApp.setIcon()` method is a no-op (matching the GTK4 WebKit backend behavior).
 - [x] Print handler — `cef_print_handler.go` wires `PrintHandler` into the client; `host.Print()` delegates to the native system print dialog
 
-### Phase 5: Wayland (🔄 PARTIAL — detached mode working, embedded via xdg-foreign pending)
+### Phase 5: Wayland (❌ CANCELLED — X11-only per Decision C16)
 
-- [x] Investigate Chrome runtime Ozone/Wayland support — CEF 147 has the Wayland Ozone platform built in (`ui/ozone/platform/wayland/host/`). Decision: switch to Chrome runtime + ozone-platform=wayland on Wayland sessions. See Decision C15.
-- [ ] CEF surface export via xdg-foreign — pending. The Wayland compositor must accept the gtk_shell1.set_parent request so GTK4 can import CEF's `wl_surface`. Currently the CEF view runs as a separate Wayland window (acceptable but not ideal).
-- [x] Test with GDK_BACKEND=wayland — verified end-to-end on a KDE/Wayland session. The demo opens a GTK4 host window; CEF creates its own Wayland window and loads `wails://localhost/`. `OnLoadEnd status=200` confirms the runtime fires. The XReparentWindow path is correctly bypassed via `cefCreateBrowserDetached`.
-- [x] Window positioning NO-OP on Wayland (Decision 3) — `cefMoveWindow()` and `linuxWebviewWindow.move()` both short-circuit on Wayland with a debug-log warning. The Wayland protocol has no XMoveWindow equivalent.
+- [x] Investigate Chrome runtime Ozone/Wayland support — CEF 147 has the Wayland Ozone platform built in. Detached mode works (CEF creates its own Wayland surface) but produces a separate window.
+- [ ] CEF surface export via xdg-foreign — not implemented. CEF 147 does not expose the required protocol.
+- [x] Wayland detection code — preserved (`cef_wayland_linux.go`, for future use).
+- [x] X11-only revert — all Wayland code paths removed. CEF always uses `--ozone-platform=x11 --runtime-style=alloy` with `XReparentWindow` embedding via XWayland. See Decision C16.
 
 ## Known Issues
 
@@ -345,13 +359,14 @@ Wiring:
 
 ### Medium
 - **Go-initiated file dialogs crash**: `CefBrowserHost::RunFileDialog` triggers SIGSEGV in single-process mode when the dialog is dismissed. Chromium V8/Mojo teardown path is broken without subprocess isolation. Renderer-initiated `<input type="file">` dialogs still work via `cefDialogHandler.OnFileDialog` returning 0 (Chromium handles natively).
-- **Wayland: CEF view is detached, not embedded**: On Wayland sessions the CEF browser runs as its own top-level Wayland window (Phase 5 / Decision C15). Embedding inside the GTK4 host requires the `gtk_shell1` xdg-foreign import protocol, which CEF 147's Chrome runtime doesn't expose. Phase 5+ will add xdg-foreign via a custom Wayland client.
+- **V8 startup snapshot requires manual copy**: CEF 147's build tree places `v8_context_snapshot.bin` in `Release/` but the `resources_dir_path` setting points to `Resources/`. The file must be copied manually. See Decision C16 for the file layout.
+- **ICU data must be next to libcef.so**: `icudtl.dat` triggers a FATAL if not present in the same directory as `libcef.so` (CEF issue #3778). We copy it there during setup.
 - **V8 Proxy resolver warning**: "Cannot use V8 Proxy resolver in single process mode." Not harmful but logged every startup.
 - **nvidia-drm warning**: `Should skip nVidia device named: nvidia-drm`. Not harmful.
 - **No user type filter warning**: For CEF built-in extension `cimiefiiaegbelhefglklhhakcgmhkai`. Not harmful.
 
 ### Low
-- **Deprecated X11 GDK functions**: `gdk_x11_display_get_xdisplay`, `gdk_x11_surface_get_xid` trigger compiler warnings. GTK4 marks them deprecated but no replacement exists for XReparentWindow workflow. On Wayland sessions the X11 calls are skipped entirely via `cefCreateBrowserDetached`.
+- **Deprecated X11 GDK functions**: `gdk_x11_display_get_xdisplay`, `gdk_x11_surface_get_xid` trigger compiler warnings. GTK4 marks them deprecated but no replacement exists for XReparentWindow workflow on GTK4/X11. These are always called now (X11-only, see Decision C16).
 
 ## Key Files
 
@@ -368,7 +383,7 @@ Wiring:
 | `v3/pkg/application/cef_drag_handler.go` | DragHandler — captures `DragData` on `OnDragEnter`, exposes paths via `wails_cefResolveDrop` (see Decision C11) |
 | `v3/pkg/application/cef_jsdialog_handler.go` | JsdialogHandler (alert/confirm/prompt/beforeunload) |
 | `v3/pkg/application/events_common_linux_cef.go` | CEF build's lifecycle glue: Linux→Common event mapping, sleep/wake (logind dbus), theme change (xdg portal), `processWindowEvent` C-callable forwarder (see Decision C13) |
-| `v3/pkg/application/cef_wayland_linux.go` | Wayland session detection (`detectWaylandSession`, `waylandRuntimeStyle`), runtime-style selector. See Decision C15. |
+| `v3/pkg/application/cef_wayland_linux.go` | Wayland session detection (`detectWaylandSession`, `waylandRuntimeStyle`), runtime-style selector. See Decision C15 (superseded by C16). |
 | `v3/pkg/application/cef_wayland_linux_test.go` | 12 test cases covering union-of-signals detection, cache reset, case-insensitive matching, runtime-style selection. |
 | `v3/pkg/application/cef_js_shim.js` | V8 extension JS — declares `wails_*` native functions and installs the CEF drag-drop capture-phase drop handler |
 | `v3/pkg/application/dialogs_linux_cef_runtime.go` | CEF-build dialog stubs (Go-initiated file dialogs disabled) |
@@ -380,10 +395,13 @@ Wiring:
 
 ## Runtime Dependencies
 
-- `libcef.so` (with debug_info) at `~/.local/share/cef/`
-- `Resources/` directory with `.pak` files, `locales/` (220 locale files)
-- `libvk_swiftshader.so`, `libEGL.so`, `libGLESv2.so` in runtime dir
-- X11 display (`DISPLAY`, `GDK_BACKEND=x11`)
+- `libcef.so` at `CEF_DIR` or `~/.local/share/cef/`
+- `icudtl.dat` next to `libcef.so` (CEF issue #3778)
+- `Resources/v8_context_snapshot.bin` (must be present in resources dir)
+- `Resources/chrome_100_percent.pak`, `chrome_200_percent.pak`, `resources.pak`
+- `Resources/locales/` (220 locale files)
+- `Release/libEGL.so`, `Release/libGLESv2.so` (loaded via `LD_LIBRARY_PATH` from `CEF_DIR`)
+- X11 display (`DISPLAY`, `GDK_BACKEND=x11`) — on Wayland, XWayland is required
 - GTK4, libX11
 
 ## Verification Matrix

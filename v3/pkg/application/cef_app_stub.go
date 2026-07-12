@@ -77,14 +77,8 @@ func (a *cefWailsApp) OnBeforeCommandLineProcessing(processType string, commandL
 	if commandLine == nil {
 		return
 	}
-	if isOnWayland() {
-		commandLine.AppendSwitchWithValue("ozone-platform", "wayland")
-		commandLine.AppendSwitchWithValue("runtime-style", "chrome")
-		commandLine.AppendSwitch("enable-features=UseOzonePlatform")
-	} else {
-		commandLine.AppendSwitchWithValue("ozone-platform", "x11")
-		commandLine.AppendSwitchWithValue("runtime-style", "alloy")
-	}
+	commandLine.AppendSwitchWithValue("ozone-platform", "x11")
+	commandLine.AppendSwitchWithValue("runtime-style", "alloy")
 	commandLine.AppendSwitch("disable-gpu")
 	commandLine.AppendSwitch("in-process-gpu")
 	commandLine.AppendSwitch("single-process")

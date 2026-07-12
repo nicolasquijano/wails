@@ -134,7 +134,7 @@ tasks:
     platforms:
       - linux
     cmds:
-      - sh: |
+      - cmd: |
           echo "Building all examples with -tags cef..."
           cd examples
           for d in */; do

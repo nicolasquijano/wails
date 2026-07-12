@@ -530,6 +530,7 @@ import "C"
 
 import (
 	"os"
+	"path/filepath"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
@@ -597,36 +598,14 @@ func cefInit() error {
 	// Belt-and-braces: restrict GDK to a single backend via the
 	// runtime API. Must happen before any GTK display is opened.
 	//
-	// On X11 (legacy / pre-Phase-5) we lock to "x11" so CEF's
-	// XReparentWindow path keeps working. On Wayland we lock to
-	// "wayland" so GTK picks its native Wayland backend; locking to
-	// "x11" on a Wayland session would force GTK through XWayland
-	// and the CEF view would land in a separate X11 window detached
-	// from our GTK host (the bug the user hit).
-	if isOnWayland() {
-		C.gdk_set_allowed_backends(C.CString("wayland"))
-	} else {
-		C.gdk_set_allowed_backends(C.CString("x11"))
-	}
+	// CEF only supports Ozone/X11 reliably.  Force GDK to X11
+	// regardless of session type; on Wayland the compositor provides
+	// XWayland (DISPLAY=:1).
+	C.gdk_set_allowed_backends(C.CString("x11"))
 
-	// Proactively initialise GTK before CEF does. CEF's library has
-	// GTK symbols inside it (it uses GTK for file dialogs etc.) and
-	// will likely call gtk_init() during cef_initialize. If we let
-	// CEF drive the first GTK init, it happens before we've had a
-	// chance to enforce the backend and we end up on the wrong
-	// display server.
-	//
-	// Doing it ourselves first makes GTK honour the backend we
-	// selected above (X11 on X11 sessions, Wayland on Wayland
-	// sessions) and opens the matching default display that CEF can
-	// reuse via gdk_display_get_default().
 	C.gtk_init()
 
-	// Sanity-check that we ended up on the backend we selected.
-	// On Wayland sessions the display name is "wayland-N"; on X11
-	// it's ":N" (the DISPLAY env). Either way, the next phase
-	// (CEF browser creation) needs the display to match what CEF
-	// was told to use via --ozone-platform.
+	// Sanity-check that we ended up on X11.
 	defaultDisplay := C.gdk_display_get_default()
 	if defaultDisplay != nil {
 		debugLog("[cefInit] post-init default display backend=%s", C.GoString(C.gdk_display_get_name(defaultDisplay)))
@@ -634,12 +613,19 @@ func cefInit() error {
 		debugLog("[cefInit] post-init no default display")
 	}
 
+	resDir := cefResourcesDir()
+	locDir := ""
+	if resDir != "" {
+		locDir = filepath.Join(resDir, "locales")
+	}
 	cefSettings = cef.Settings{
 		MultiThreadedMessageLoop: false, // We pump manually from GTK loop.
 		ExternalMessagePump:      true,
 		NoSandbox:                true, // Required when running as non-root in containers.
 		LogSeverity:              0,    // LOGSEVERITY_VERBOSE
 		LogFile:                  "/tmp/wails-cef.log",
+		ResourcesDirPath:         resDir,
+		LocalesDirPath:           locDir,
 	}
 
 	// Build the CefApp that injects the Chromium command-line switches
@@ -931,13 +917,6 @@ func cefMoveWindow(window pointer, x, y int) {
 		return
 	}
 	// Wayland compositors reject explicit window placement; calling
-	// XMoveWindow on a Wayland session either silently no-ops or
-	// crashes depending on the compositor. Short-circuit before the
-	// Xlib call. See Decision C15.
-	if isOnWayland() {
-		debugLog("[cefMoveWindow] ignoring move to (%d, %d): Wayland compositor owns placement", x, y)
-		return
-	}
 	C.window_move_x11((*C.GtkWindow)(window), C.int(x), C.int(y))
 }
 
@@ -1144,15 +1123,6 @@ func cefCreateBrowserInWidget(gtkWindow unsafe.Pointer, gtkBox unsafe.Pointer, u
 	// surfaces in GTK4 — only the top-level GtkWindow does.
 	if !bool(C.gtk_widget_get_realized((*C.GtkWidget)(gtkWindow)) != 0) {
 		C.gtk_widget_realize((*C.GtkWidget)(gtkWindow))
-	}
-
-	// On Wayland, CEF creates its own surface via Chrome runtime +
-	// Ozone/Wayland. The GTK4 host has no X11 handle so we can't
-	// reparent anything into it. CEF runs as its own top-level
-	// window — see Decision C15. Phase 5 will replace this with an
-	// xdg-foreign import path.
-	if isOnWayland() {
-		return cefCreateBrowserDetached(gtkWindow, url, width, height, w)
 	}
 
 	// Walk GtkWindow -> GtkNative -> GdkSurface -> X11 handle.

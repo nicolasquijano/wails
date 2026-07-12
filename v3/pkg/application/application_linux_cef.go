@@ -102,35 +102,19 @@ func setProgramName(name string) { _ = name }
 // See IMPLEMENTATION.md 2026-07-10 session for the GPU-process crash
 // that motivated moving this out of os.Exit and into CEF's path.
 func init() {
-	// On Wayland, leave GDK_BACKEND alone so GTK4 picks its native
-	// Wayland backend (via the xdg-wayland or wayland GDK backend,
-	// whichever ships). XDG_SESSION_TYPE is the most reliable signal
-	// here because WAYLAND_DISPLAY isn't always exported (e.g.,
-	// inside containers, ssh, or when launchers strip it).
-	//
-	// On X11 (default, also the historical behavior) we force
-	// GDK_BACKEND=x11 and unset WAYLAND_DISPLAY. This was needed
-	// pre-Phase-5 because GTK would otherwise pick Wayland on a
-	// forced-X11 Wayland session and the CEF XReparentWindow path
-	// (see Decision C3) wouldn't work.
-	onWayland := os.Getenv("WAYLAND_DISPLAY") != "" ||
-		strings.EqualFold(os.Getenv("XDG_SESSION_TYPE"), "wayland") ||
-		strings.EqualFold(os.Getenv("GDK_BACKEND"), "wayland")
-
-	if !onWayland {
-		if os.Getenv("GDK_BACKEND") == "" {
-			_ = os.Setenv("GDK_BACKEND", "x11")
-		}
-		if os.Getenv("GDK_BACKEND") == "x11" && os.Getenv("WAYLAND_DISPLAY") != "" {
-			_ = os.Unsetenv("WAYLAND_DISPLAY")
-		}
-		// CEF reads OZONE_PLATFORM at startup. x11 is the only
-		// backend that works reliably when GTK is on XWayland and
-		// the user has no working GPU sandbox.
-		if os.Getenv("OZONE_PLATFORM") == "" {
-			_ = os.Setenv("OZONE_PLATFORM", "x11")
-		}
+	// Force X11 for both GTK4 and CEF regardless of session type.
+	// CEF's Wayland support is not yet production-ready (no
+	// upstream framework — Electron, Energy, etc. — ships it),
+	// and our XReparentWindow embedding only works under X11.
+	// On Wayland sessions the compositor provides XWayland
+	// (DISPLAY=:1), which is sufficient.
+	if os.Getenv("GDK_BACKEND") == "" {
+		_ = os.Setenv("GDK_BACKEND", "x11")
 	}
+	if os.Getenv("OZONE_PLATFORM") == "" {
+		_ = os.Setenv("OZONE_PLATFORM", "x11")
+	}
+	_ = os.Unsetenv("WAYLAND_DISPLAY")
 
 	for _, a := range os.Args {
 		switch a {
