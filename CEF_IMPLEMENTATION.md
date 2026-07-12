@@ -339,6 +339,63 @@ it is not a generic Node executable serving as CEF's host.
    single-process backend as a selectable fallback until feature parity is
    verified. Do not load Go as a shared library inside the host or helper.
 
+#### Execution plan (C++ host)
+
+| Milestone | Deliverable | Boundary and acceptance criterion |
+|---|---|---|
+| M0 — Contract freeze | `cef_host_protocol.md` plus versioned wire schema | Defines maximum payload, request IDs, deadline/cancel semantics, window/frame identity, error envelope, capability token and allowed host operations. No CEF or Go code changes before this contract is reviewed. |
+| M1 — Native host skeleton | `v3/pkg/application/cef_host/` CMake project and `wails-cef-host` | A C++20 executable calls `CefExecuteProcess` before `CefInitialize`, creates one GTK/X11 window and loads a static `wails://` page using normal renderer/GPU/utility processes. The process tree must contain no Go ancestor of zygote. |
+| M2 — Go runtime sidecar | `cmd/wails-go-runtime/` with Unix-socket listener | The C++ host starts Go with `posix_spawn`/exec, waits for a ready handshake with timeout, and kills/reaps it on host shutdown. The Go process imports platform-neutral Wails runtime code only; CEF/GTK imports are compile-time forbidden. |
+| M3 — Secure transport | Framed Unix-domain RPC implementation in both processes | Socket directory is `0700`, socket is owner-only, every frame carries protocol version + launch capability, and input/output sizes are capped before allocation. Unit tests cover forged token, malformed length, unsupported version, timeout and peer disconnect. |
+| M4 — Asset and startup path | Go asset service plus C++ `ResourceRequestHandler` proxy | `wails://localhost/` loads the current runtime/assets through the private RPC channel. Browser startup, SPA fallback, MIME types and HTTP POST runtime payloads match the current `cef_request_handler.go` behaviour. |
+| M5 — Async bindings | Renderer V8 extension → C++ host → Go `MessageProcessor` | `wails.Call.ByName`, cancellation and Go→JS events work with concurrent requests. Responses are addressed to their original browser/frame and dropped after navigation/close. The existing synchronous V8 path is not used in the new backend. |
+| M6 — Native feature parity | C++ host RPC adapters for window, dialogs, menus, clipboard, DnD and lifecycle | Each public Wails API is either implemented, explicitly unsupported with a stable error, or retained behind the single-process fallback. File dialogs, renderer crash/reload and multi-window lifecycle are mandatory before promotion. |
+| M7 — Build and package | One build command produces host, Go sidecar and pinned CEF bundle | Host has `$ORIGIN` runtime lookup, validates CEF data files at startup, preserves executable permissions, and runs from a clean bundle without `CEF_DIR`, source tree or developer SDK. |
+| M8 — Promotion | Feature flag defaults to multi-process | Only after all parity and fault-injection checks pass on X11/XWayland. Single-process remains available for one release cycle as an emergency fallback, then its removal is a separate decision. |
+
+**C++ host responsibilities**:
+
+- Own `CefApp`, `CefClient`, renderer-process handler, CEF custom scheme,
+  request handler and all `CefBrowser`/`CefFrame` references.
+- Own GTK/X11 window creation, reparenting, resize/focus signals, native menus,
+  dialogs, drag/drop and CEF message-loop integration.
+- Maintain a bounded pending-request map keyed by `(browser_id, frame_id,
+  request_id)`; clear it on frame detach, renderer termination, navigation and
+  backend disconnect.
+- Never deserialize business payloads into C++ domain types. It validates the
+  transport envelope then forwards opaque JSON/bytes to Go.
+
+**Go sidecar responsibilities**:
+
+- Own `MessageProcessor`, service binding registry, asset server, event bus,
+  application configuration, data access, files and all CPU-intensive work.
+- Return only serializable response/event envelopes; it never holds a GTK,
+  CEF, browser or frame pointer.
+- Treat the host connection as cancellable: when it closes, cancel outstanding
+  request contexts and exit cleanly rather than attempting to restart CEF.
+
+**Migration order and compatibility**:
+
+1. Land M0–M3 without changing the default CEF backend.
+2. Prove M4–M5 in a new `cef-host-hello` example before moving existing demos.
+3. Migrate `cef-hello`, then `cef-multiwin`, then `cef-shadcn-admin`; compare
+   each against the current verification matrix.
+4. Migrate host APIs in groups: lifecycle/window state → events/bindings →
+   assets/network → dialogs/clipboard/DnD → printing/devtools.
+5. Remove the opt-in Go-browser helper experiment only after M1 is proven; it
+   must not become a second production multi-process path.
+
+**Fault-injection and performance requirements**:
+
+- Kill renderer, GPU, Go sidecar and host independently; verify ownership,
+  cleanup, visible error and recovery policy for each case.
+- Apply request floods, 16 MB oversized frames, malformed JSON, closed-frame
+  replies, reconnect attempts and delayed backend responses.
+- Measure launch-to-first-paint, p50/p95 binding round-trip, renderer memory,
+  host memory, Go memory and GPU/WebGL availability against the current
+  single-process baseline. UI input must not wait for Go RPC; expensive work is
+  always asynchronous and cancellable.
+
 **Validation gates**:
 
 - A process-tree test proves that the browser, zygote, renderer, GPU and
