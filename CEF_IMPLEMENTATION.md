@@ -343,7 +343,7 @@ it is not a generic Node executable serving as CEF's host.
 
 | Milestone | Deliverable | Boundary and acceptance criterion |
 |---|---|---|
-| M0 — Contract freeze | `cef_host_protocol.md` plus versioned wire schema | Defines maximum payload, request IDs, deadline/cancel semantics, window/frame identity, error envelope, capability token and allowed host operations. No CEF or Go code changes before this contract is reviewed. |
+| M0 — Contract freeze (🔄 DRAFTED) | [`v3/docs/cef-host-protocol.md`](v3/docs/cef-host-protocol.md) plus versioned wire schema | Defines maximum payload, request IDs, deadline/cancel semantics, window/frame identity, error envelope, capability token and allowed host operations. No CEF or Go code changes before this contract is reviewed. |
 | M1 — Native host skeleton | `v3/pkg/application/cef_host/` CMake project and `wails-cef-host` | A C++20 executable calls `CefExecuteProcess` before `CefInitialize`, creates one GTK/X11 window and loads a static `wails://` page using normal renderer/GPU/utility processes. The process tree must contain no Go ancestor of zygote. |
 | M2 — Go runtime sidecar | `cmd/wails-go-runtime/` with Unix-socket listener | The C++ host starts Go with `posix_spawn`/exec, waits for a ready handshake with timeout, and kills/reaps it on host shutdown. The Go process imports platform-neutral Wails runtime code only; CEF/GTK imports are compile-time forbidden. |
 | M3 — Secure transport | Framed Unix-domain RPC implementation in both processes | Socket directory is `0700`, socket is owner-only, every frame carries protocol version + launch capability, and input/output sizes are capped before allocation. Unit tests cover forged token, malformed length, unsupported version, timeout and peer disconnect. |
