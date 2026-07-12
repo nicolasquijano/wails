@@ -6,29 +6,10 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
-	"sync"
 	"unsafe"
 
 	"github.com/bnema/purego-cef/cef"
 )
-
-// osrFrame is the Phase 6 OSR frame buffer. The X11 reparenting path
-// never touches it; it's defined here so the struct layout is stable
-// across the CEF backend regardless of which render path is in use.
-type osrFrame struct {
-	width, height int
-	painted       bool
-	buffer        []byte
-}
-
-// osrResizeMsg mirrors the C-side osrResizeMsg struct in
-// linux_cgo_cef.go. Defined here so the linuxWebviewWindow field
-// `osrResizeCh chan osrResizeMsg` compiles. Phase 6 wires the channel
-// to the g_idle_add_full bridge.
-type osrResizeMsg struct {
-	w             uintptr
-	width, height int
-}
 
 // linuxWebviewWindow is the CEF-flavoured webview window for Phase 1.
 //
@@ -70,18 +51,6 @@ type linuxWebviewWindow struct {
 	// wails_cefResolveDrop native function (see cef_drag_handler.go
 	// and cef_js_shim.js).
 	dragSlot dragDataSlot
-
-	// OSR (off-screen rendering) state. Populated only on Wayland
-	// sessions where CEF can't embed inside the GTK4 window via
-	// XReparentWindow. The drawingArea is a GtkDrawingArea that
-	// blits osrFrame.buffer onto the GTK window on every paint cycle.
-	// Phase 6 OSR work populates these; until then they sit at zero
-	// values so the struct layout is stable.
-	osrFrameMu    sync.RWMutex
-	osrFrame      osrFrame
-	drawingArea   unsafe.Pointer
-	osrResizeCh   chan osrResizeMsg
-	osrResizeOnce sync.Once
 
 	moveDebouncer     func(func())
 	resizeDebouncer   func(func())
