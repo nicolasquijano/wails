@@ -549,56 +549,56 @@ End-to-end tests run via puppeteer-core against `http://127.0.0.1:9999/json` (CD
 
 ---
 
-## Phase 6: Performance for raw-photo workloads (📋 PLANNED — 2026-07-11)
+## Phase 6: Performance for raw-photo workloads (📋 PLANNED — revised 2026-07-12)
 
-**Context.** A future consumer of Wails CEF is a raw-photo developer where the canvas updates constantly (sliders, brush strokes, zoom, pan on a 24MP image) and must sustain 60+ FPS for interactive editing. Wails CEF's native-window embedding (X11 `XReparentWindow`) cannot hit that target on Wayland (no equivalent of `XReparentWindow`; see Decision C15). Off-screen rendering (OSR) — CEF paints into a BGRA buffer that we composite into a `GtkDrawingArea` — is the **only** way to truly embed CEF inside a GTK4 window on Wayland, but it carries an obligatory GPU→CPU readback on every frame that makes it unsuitable for the photo canvas itself (estimates below).
+**Decision.** This phase is viable only as a **hybrid renderer**. CEF renders the
+application UI; a native `GtkGLArea` renders the active RAW photo. CEF must not
+be the per-frame photo canvas. The current supported host is X11/XWayland
+(Decision C16), where CEF is embedded with `XReparentWindow`. Native Wayland
+embedding is not a prerequisite for this phase and is not assumed.
 
-**Honest perf budget (1920×1080, no HiDPI):**
+**Why.** A RAW editor needs immediate feedback while sliders, zoom, pan and
+brushes change. The first visible result must not wait for LibRaw, disk I/O, or
+a Wails binding. The UI keeps slider state locally and applies an approximate
+GLSL result immediately; Go concurrently renders a precise preview and returns
+it only when its `photoFingerprint`, `recipeRevision`, decoder/profile version,
+and size still match the active request. Obsolete renders are cancelled or
+dropped.
 
-| Path | Frame time | Effective FPS | Use case |
-|---|---|---|---|
-| Native window + XReparentWindow (X11) | ~16ms | 60 | X11 only |
-| Detached window (Wayland current) | n/a | n/a | Browser opens in its own Wayland window |
-| OSR, no optimizations | ~30ms | 33 | UI only, low update rate |
-| OSR, optimized (Phase A) | ~20-25ms | 40-50 | UI panels, sidebars, dialogs |
-| Native GtkGLArea + GLSL (Phase B) | ~2-5ms | 200+ | **Photo canvas (60+ FPS easy)** |
+**Performance model.** The figures below are hypotheses, not verified claims.
+They must be measured on the supported CEF build, real hardware, and real RAW
+files before being used as acceptance criteria.
 
-**Conclusion.** Wails CEF alone cannot deliver 60 FPS for raw-photo editing. The right architecture is **hybrid**: CEF for UI (which Phase A optimizes), native `GtkGLArea` for the canvas (Phase B). Zero-copy CEF→GL on Wayland requires a C++ custom subprocess (3+ months) and is out of scope.
+| Path | Expected role | Performance status |
+|---|---|---|
+| Native CEF child window over X11/XWayland | Wails UI | Existing supported path; not the RAW canvas |
+| Native `GtkGLArea` + GLSL | Active photo canvas | Target path for 60 FPS interaction; validate on target GPUs |
+| CEF OSR → CPU BGRA → GTK/Cairo | Wayland-native UI research only | Unsuitable for the per-frame photo canvas because every frame incurs readback/copy |
+| Detached CEF Wayland window | Unsupported UX | Not a viable editor host: it leaves the GTK host separate |
 
-### Phase 6A — OSR optimized for UI (8-10 days)
+**Non-goals.** Multi-process CEF (Decision C17) improves UI isolation and can
+enable GPU-backed Chromium features, but it does not make RAW demosaic,
+preview generation, or CEF-to-GL composition free. A C++ subprocess alone also
+does not provide zero-copy Wayland surface sharing; that would require a CEF
+surface-export API and a separate, validated compositor design.
 
-**Target:** 40-50 FPS at 1080p with input forwarding complete and zero GC pauses on the hot path. Suitable for UI panels, sidebars, dialogs, presets, histograms.
+### Phase 6A — NativeCanvas vertical slice (first implementation)
 
-**Tasks:**
-
-| ID | Task | Effort | Notes |
-|---|---|---|---|
-| A1 | Input forwarding (keyboard, mouse, wheel, focus, modifiers) | 3-4 d | GTK4 event controllers → `CefBrowserHost::SendKeyEvent` / `SendMouseMoveEvent` / `SendMouseWheelEvent` / `SetFocus`. XKB keycode → Windows VirtualKey translation table (subset: letters, digits, symbols, modifiers, F-keys, navigation). IME deferred (follow-up). |
-| A2 | Dirty rects (`OnPaint` second arg `dirtyRects`) | 2 d | Per-rect `cairo_rectangle` + `cairo_fill`. Save Cairo state across rects. |
-| A3 | Frame coalescing (multiple OnPaint → one GTK redraw per ~16ms) | 1 d | `g_idle_add_full` with throttling; tracks last redraw timestamp. |
-| A4 | Buffer pool + zero allocs in hot path | 1 d | Pre-grow `osrFrame.buffer` once; reuse on same-size paints. Verify with `go test -bench`. |
-| A5 | Resize storm handling | 1 d | Coalesce `WasResized` + `Invalidate`; one pending per idle tick. |
-| A6 | Cairo stride optimization | 1 d | Pad-aware stride; verify against gradient test for visual artifacts. |
-
-**Checkpoints:**
-- **A1:** mouse + keyboard work in `cef-hello`, captured with `puppeteer-core` `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent`.
-- **A2:** 30% blit-time reduction on a 1080p redraw benchmark.
-- **A3:** 16ms minimum interval between successive `gtk_widget_queue_draw`.
-- **A5:** 5s window-corner drag yields 1 final resize, not 60+.
-
-### Phase 6B — `NativeCanvas` API for hybrid architecture (3-5 days)
-
-**Target:** Expose a `GtkGLArea` inside the same Wails window that hosts CEF. App code renders the photo canvas via standard `go-gl` / `vulkan-go`; CEF hosts the UI overlay.
+**Target:** Prove the hybrid architecture on X11/XWayland with one real preview
+texture and measured input-to-paint latency. The first version uses a split or
+explicitly assigned canvas region. It does **not** promise a transparent CEF
+overlay: a reparented native CEF child window cannot safely be stacked and
+composited like a regular GTK widget.
 
 **API proposal (Go):**
 
 ```go
 type NativeCanvas struct { /* ... */ }
 
-// AttachNativeCanvas creates a GtkGLArea inside the window. Returns
-// the existing canvas if already attached. The area fills the content
-// space; CEF is rendered either above (overlay) or below (background)
-// depending on z-order (currently: below CEF, so CEF is the overlay).
+// AttachNativeCanvas creates a GtkGLArea in an explicitly assigned content
+// region. It returns the existing canvas if already attached. CEF and GL
+// start as sibling regions; overlay composition is deferred to a future OSR
+// or compositor design.
 func (w *linuxWebviewWindow) AttachNativeCanvas() *NativeCanvas
 
 // Detach removes the GL area. The window reverts to CEF-only mode.
@@ -615,61 +615,32 @@ func (nc *NativeCanvas) SetResizeCallback(cb func(w, h int))
 
 **Tasks:**
 
-| ID | Task | Effort | Notes |
-|---|---|---|---|
-| B1 | Go API surface + tests | 1 d | Above signature. Tests for re-attach idempotency, Detach cleanup. |
-| B2 | C-side `cefAttachNativeCanvas` (GtkGLArea creation, render/resize hooks) | 1 d | `gtk_gl_area_set_render_func` + `gtk_gl_area_set_resize_func`. Z-order via `gtk_box_reorder_child`. |
-| B3 | Input router (mouse on GL area → callback; mouse on CEF → CEF) | 1 d | Per-widget `GtkEventControllerMotion`; consume event when over the GL area. |
-| B4 | Example: `v3/examples/cef-native-canvas-demo/` (triangle + texture upload) | 1 d | Uses `go-gl` to render a red triangle, demonstrates the API surface. |
-
-**Checkpoints:**
-- **B2:** `cef-native-canvas-demo` builds and shows a red triangle inside a GTK window that also has a CEF UI.
-- **B3:** hovering over the triangle does NOT trigger a CEF mouse event.
-
-### Phase 6D — Documentation (1 day, **done first**)
-
-**Target:** Anyone reading the codebase understands the performance budget and the hybrid pattern. No surprises.
-
-**Tasks:**
-
-| ID | Task | Effort |
-|---|---|---|
-| D1 | Update `CEF_IMPLEMENTATION.md` with Phase 6 plan + Decision C16/C17/C18 | included in this section |
-| D2 | ADR in `v3/docs/adr/0017-cef-osr-for-photo-canvas.md` | 1 d |
-| D3 | Update Verification Matrix with OSR FPS numbers | 1 d (combined with D1) |
-
-**Risks and mitigations:**
-
-| Risk | Mitigation |
+| Work item | Outcome |
 |---|---|
-| XKB → VirtualKey table is bigger than estimated (A1) | Ship subset with clear "unsupported keys warn" log; document as follow-up. |
-| Cairo optimizations introduce banding on gradients (A6) | Visual regression test against a known-good screenshot before/after. |
-| `GtkGLArea` + Wayland EGL bugs on Nvidia (B2) | Document "tested on Mesa/Intel only"; fail gracefully on detection. |
-| IME not in scope (A1) | Follow-up issue; explicit "not implemented" in docs. |
+| Canvas lifecycle | Idempotent attach/detach, resize and context-loss cleanup tests |
+| GL presentation | A demo uploads and presents a compact preview texture; no RAW matrix crosses Wails IPC |
+| Input ownership | Pointer/keyboard events go to the canvas only inside its region and to CEF only inside the UI region |
+| Preview protocol | Requests carry photo fingerprint, recipe revision, output size and priority; stale results cannot replace the active image |
+| Cancellation and queues | Separate active-preview, thumbnail and export queues; active preview wins and old slider work is cancelled |
 
-**Out of scope:**
+**Acceptance measurements:** capture baseline and post-change p50/p95 for
+input-to-paint, approximate-slider paint, precise-preview completion, cache
+hit rate, memory, and dropped stale work. Run continuous slider drag, rapid
+photo switching, and library sizes of 1,000/10,000/50,000 images. Do not claim
+60 FPS, 200 FPS, or a cache benefit without these measurements.
 
-- ❌ Zero-copy CEF→GL on Wayland (requires C++ custom subprocess, 3+ months)
-- ❌ Multi-touch input (CefBrowserHost::SendTouchEvent exists, not prioritized)
-- ❌ Drag-and-drop between CEF and NativeCanvas
-- ❌ Performance profiling on real photo workloads (the consumer's responsibility)
+### Phase 6B — OSR research (only if native Wayland becomes a product goal)
 
-**Timeline (15 working days, ~3 weeks of 1-2h sessions):**
+**Target:** Determine whether CEF UI panels can be embedded natively in a GTK
+Wayland window without regressing input or memory. This is separate from the
+photo canvas and must not block Phase 6A.
 
-| Week | Phase | Deliverable |
-|---|---|---|
-| W1 (Mon-Tue) | D | Docs + ADR signed off |
-| W1 (Wed-Fri) | A1 | Input forwarding end-to-end demo |
-| W2 (Mon-Tue) | A2-A3 | Dirty rects + coalescing + benchmark |
-| W2 (Wed-Thu) | A4-A6 | Polish + all tests green |
-| W3 (Mon-Wed) | B1-B3 | NativeCanvas API + C setup + input router |
-| W3 (Thu-Fri) | B4 | Example builds, all tests green |
+The investigation includes complete GTK input forwarding, dirty-rectangle
+handling, frame coalescing, buffer reuse, resize coalescing, IME behaviour,
+and visual regression testing. Its exit criterion is a measured UI result on
+real hardware, not a preselected FPS estimate. If it does not meet the UI
+budget, XWayland remains the supported deployment path.
 
-**Open questions before kick-off:**
-
-1. Timeline acceptable? If shorter, A6 + B4 are the easiest to drop.
-2. Does the team have Go/CGo experience? They'll need to read the callbacks to extend.
-3. Test environment confirmed (`cef-hello` runs on their machine and renders content, not just an empty window)?
-4. Architecture B is the right escape hatch for their use case, or do they need a different model?
-
-If all green, kick off with D tomorrow.
+**Out of scope:** zero-copy CEF-to-GL composition on Wayland, transparent
+native-window overlay, multi-touch, and drag-and-drop between CEF and the
+canvas. Each needs its own design and benchmark before scheduling.
