@@ -72,8 +72,6 @@ void SetupX11() {
 int main(int argc, char** argv) {
     ExtractCapabilityAndArgs(argc, argv);
 
-    SetupX11();
-
     CefRefPtr<HostApp> app(new HostApp());
 
     CefMainArgs main_args(argc, argv);
@@ -83,12 +81,22 @@ int main(int argc, char** argv) {
         return exit_code;
     }
 
+    SetupX11();
+
     CefSettings settings;
     settings.multi_threaded_message_loop = false;
     settings.external_message_pump = true;
     settings.no_sandbox = true;
     settings.log_severity = LOGSEVERITY_INFO;
     settings.remote_debugging_port = 9999;
+
+    std::string cef_dir = GetEnvOr("CEF_DIR", "");
+    if (!cef_dir.empty()) {
+        std::string resources_dir = cef_dir + "/Resources";
+        std::string locales_dir = resources_dir + "/locales";
+        CefString(&settings.resources_dir_path) = resources_dir;
+        CefString(&settings.locales_dir_path) = locales_dir;
+    }
 
     if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
         std::cerr << "wails-cef-host: CefInitialize failed" << std::endl;
