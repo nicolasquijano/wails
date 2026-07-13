@@ -4,9 +4,9 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1 (native C++ host skeleton) and M2 (Go sidecar) started.
+**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M5 complete, M6 (native feature parity) pending.
 
-**Multi-process status (Decision C18)**: Native C++ `wails-cef-host` skeleton created with CMake build, CEF init, GTK/X11 window embedding. Go `wails-go-runtime` sidecar created with Unix socket RPC framing. M3 (secure transport) pending.
+**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge) all complete. M6 (native feature parity) pending.
 
 **Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
@@ -423,7 +423,7 @@ it is not a generic Node executable serving as CEF's host.
 - Framed transport: 4-byte big-endian length + UTF-8 JSON
 - Max payload: 16 MiB, max concurrent requests: 256
 
-### M1 — Native host skeleton 🔄 IN PROGRESS
+### M1 — Native host skeleton ✅ COMPLETE (2026-07-13)
 **Files created**:
 ```
 v3/cmd/wails-cef-host/
@@ -438,7 +438,7 @@ v3/cmd/wails-cef-host/
     └── window_host.cc      # GTK socket embedding, resize handling
 ```
 
-### M2 — Go runtime sidecar 🔄 IN PROGRESS
+### M2 — Go runtime sidecar ✅ COMPLETE (2026-07-13)
 **Files created**:
 ```
 v3/cmd/wails-go-runtime/
@@ -454,13 +454,13 @@ v3/cmd/wails-go-runtime/
 - Ready response sent after successful validation
 - AuthenticatedListener class wraps SocketListener with validation
 
-### M4 — Asset and startup path 🔄 IN PROGRESS (2026-07-13)
+### M4 — Asset and startup path ✅ COMPLETE (2026-07-13)
 - C++ AssetRequestHandler + AssetResourceHandler for `wails://` scheme
 - Proxies requests to Go sidecar via Unix socket RPC
 - CefSchemeHandlerFactory for custom scheme registration
 - ReadResponse streaming with offset tracking
 
-### M5 — Async bindings 🔄 IN PROGRESS (2026-07-13)
+### M5 — Async bindings ✅ COMPLETE (2026-07-13)
 - C++ V8Handler receives JS calls (wails_invoke, wails_invokeAsync, wails_callback, wails_log)
 - Routes to Go sidecar via Unix socket RPC
 - Generates unique request IDs for async call tracking
