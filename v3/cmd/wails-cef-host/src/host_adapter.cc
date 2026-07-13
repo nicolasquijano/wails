@@ -1,4 +1,5 @@
 #include "host_adapter.h"
+#include "ipc_handler.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,9 @@ void HostAdapter::OnRequest(const std::string& request_id,
                             const std::string& payload,
                             int browser_id,
                             int window_id) {
+    browser_id_ = browser_id;
+    window_id_ = window_id;
+
     if (operation.rfind("host.window.", 0) == 0) {
         HandleWindowOperation(request_id, operation, payload);
     } else if (operation.rfind("host.dialog.", 0) == 0) {
@@ -598,19 +602,16 @@ void HostAdapter::SendResponse(const std::string& request_id, bool ok,
                                const std::string& error_code,
                                const std::string& error_message,
                                const std::string& payload) {
-    (void)request_id;
-    (void)ok;
-    (void)error_code;
-    (void)error_message;
-    (void)payload;
+    RpcChannel::Instance().SendResponse(
+        request_id, ok, error_code, error_message, payload,
+        browser_id_, "", window_id_);
 }
 
 void HostAdapter::SendEvent(const std::string& operation,
                             const std::string& payload,
                             int browser_id,
                             int window_id) {
-    (void)operation;
-    (void)payload;
-    (void)browser_id;
-    (void)window_id;
+    RpcChannel::Instance().SendEvent(operation, payload,
+                                     browser_id > 0 ? browser_id : browser_id_,
+                                     "", window_id > 0 ? window_id : window_id_);
 }

@@ -20,6 +20,8 @@
 
 #include <gio/gunixsocketaddress.h>
 #include <glib.h>
+#include <json/json.h>
+#include <mutex>
 
 namespace {
 
@@ -301,76 +303,41 @@ bool AuthenticatedListener::ValidateAndDispatch(int client_fd, std::vector<uint8
 Envelope ParseEnvelope(const std::vector<uint8_t>& data, std::string* err) {
     Envelope env;
 
-    if (data.size() < 2) {
-        *err = "envelope too short";
+    if (data.empty()) {
+        if (err) *err = "empty data";
         return env;
     }
 
-    env.version = data[0];
+    Json::Value root;
+    Json::String parse_err;
+    if (!Json::parse(std::string(data.begin(), data.end()), &root, &parse_err)) {
+        if (err) *err = "JSON parse error: " + parse_err;
+        return env;
+    }
+
+    env.version = root.get("v", 0).asInt();
     if (env.version != 1) {
-        *err = "unsupported protocol version: " + std::to_string(env.version);
+        if (err) *err = "unsupported protocol version: " + std::to_string(env.version);
         return env;
     }
 
-    env.kind = static_cast<EnvelopeKind>(data[1]);
+    env.kind = static_cast<EnvelopeKind>(root.get("kind", 0).asInt());
+    env.capability = root.get("capability", "").asString();
+    env.request_id = root.get("id", "").asString();
+    env.browser_id = root.get("browserId", 0).asInt();
+    env.frame_id = root.get("frameId", "").asString();
+    env.window_id = root.get("windowId", 0).asInt();
+    env.operation = root.get("operation", "").asString();
+    env.deadline_unix_ms = root.get("deadlineUnixMs", 0).asInt64();
+    env.ok = root.get("ok", true).asBool();
+    env.error_code = root.get("error_code", "").asString();
+    env.error_message = root.get("error_message", "").asString();
+    env.reason = root.get("reason", "").asString();
 
-    size_t pos = 2;
-
-    auto read_string = [&](const std::string& field_name) -> std::string {
-        if (pos >= data.size()) return "";
-        size_t start = pos;
-        while (pos < data.size() && data[pos] != 0) pos++;
-        std::string result(data.begin() + start, data.begin() + pos);
-        if (pos < data.size()) pos++;
-        return result;
-    };
-
-    auto read_int = [&]() -> int64_t {
-        if (pos + 8 > data.size()) return 0;
-        int64_t val = 0;
-        for (int i = 0; i < 8; ++i) {
-            val = (val << 8) | data[pos++];
-        }
-        return val;
-    };
-
-    env.capability = read_string("capability");
-    env.request_id = read_string("request_id");
-
-    if (env.kind == EnvelopeKind::Request || env.kind == EnvelopeKind::Response ||
-        env.kind == EnvelopeKind::Event) {
-        env.browser_id = static_cast<int>(read_int());
-        env.frame_id = read_string("frame_id");
-        env.window_id = static_cast<int>(read_int());
-        env.operation = read_string("operation");
-        env.deadline_unix_ms = read_int();
-
-        if (pos < data.size()) {
-            env.payload.assign(data.begin() + pos, data.end());
-        }
-    }
-
-    if (env.kind == EnvelopeKind::Response) {
-        if (pos < data.size()) {
-            env.ok = (data[pos] != 0);
-            pos++;
-        }
-        if (pos < data.size()) {
-            size_t err_start = pos;
-            while (pos < data.size() && data[pos] != 0) pos++;
-            env.error_code.assign(data.begin() + err_start, data.begin() + pos);
-            if (pos < data.size()) pos++;
-        }
-        if (pos < data.size()) {
-            size_t msg_start = pos;
-            while (pos < data.size() && data[pos] != 0) pos++;
-            env.error_message.assign(data.begin() + msg_start, data.begin() + pos);
-        }
-    }
-
-    if (env.kind == EnvelopeKind::Hello) {
-        if (pos < data.size()) {
-            env.payload.assign(data.begin() + pos, data.end());
+    const Json::Value& payload = root["payload"];
+    if (!payload.isNull()) {
+        if (payload.isString()) {
+            env.payload = std::vector<uint8_t>(payload.asString().begin(), payload.asString().end());
         }
     }
 
@@ -378,46 +345,114 @@ Envelope ParseEnvelope(const std::vector<uint8_t>& data, std::string* err) {
 }
 
 std::vector<uint8_t> SerializeEnvelope(const Envelope& env) {
-    std::vector<uint8_t> out;
-
-    out.push_back(static_cast<uint8_t>(env.version));
-    out.push_back(static_cast<uint8_t>(env.kind));
-
-    auto append_string = [&](const std::string& s) {
-        out.insert(out.end(), s.begin(), s.end());
-        out.push_back(0);
-    };
-
-    auto append_int64 = [&](int64_t v) {
-        uint8_t buf[8];
-        for (int i = 7; i >= 0; --i) {
-            buf[i] = v & 0xFF;
-            v >>= 8;
-        }
-        out.insert(out.end(), buf, buf + 8);
-    };
-
-    append_string(env.capability);
-    append_string(env.request_id);
-
-    if (env.kind == EnvelopeKind::Request || env.kind == EnvelopeKind::Response ||
-        env.kind == EnvelopeKind::Event) {
-        append_int64(env.browser_id);
-        append_string(env.frame_id);
-        append_int64(env.window_id);
-        append_string(env.operation);
-        append_int64(env.deadline_unix_ms);
-    }
-
-    if (env.kind == EnvelopeKind::Response) {
-        out.push_back(env.ok ? 1 : 0);
-        append_string(env.error_code);
-        append_string(env.error_message);
-    }
+    Json::Value root;
+    root["v"] = env.version;
+    root["kind"] = static_cast<int>(env.kind);
+    root["capability"] = env.capability;
+    root["id"] = env.request_id;
+    root["browserId"] = env.browser_id;
+    root["frameId"] = env.frame_id;
+    root["windowId"] = env.window_id;
+    root["operation"] = env.operation;
+    root["deadlineUnixMs"] = static_cast<Json::Int64>(env.deadline_unix_ms);
+    root["ok"] = env.ok;
+    if (!env.error_code.empty()) root["error_code"] = env.error_code;
+    if (!env.error_message.empty()) root["error_message"] = env.error_message;
+    if (!env.reason.empty()) root["reason"] = env.reason;
 
     if (!env.payload.empty()) {
-        out.insert(out.end(), env.payload.begin(), env.payload.end());
+        root["payload"] = Json::Value(std::string(env.payload.begin(), env.payload.end()));
     }
 
-    return out;
+    std::string json = Json::unparse(root);
+    return std::vector<uint8_t>(json.begin(), json.end());
+}
+
+RpcChannel& RpcChannel::Instance() {
+    static RpcChannel instance;
+    return instance;
+}
+
+void RpcChannel::RegisterBrowser(int browser_id, int client_fd) {
+    std::lock_guard<std::mutex> lock(fd_mutex_);
+    browser_to_fd_[browser_id] = client_fd;
+}
+
+void RpcChannel::UnregisterBrowser(int browser_id) {
+    std::lock_guard<std::mutex> lock(fd_mutex_);
+    browser_to_fd_.erase(browser_id);
+}
+
+int RpcChannel::GetClientFd(int browser_id) const {
+    std::lock_guard<std::mutex> lock(fd_mutex_);
+    auto it = browser_to_fd_.find(browser_id);
+    if (it != browser_to_fd_.end()) {
+        return it->second;
+    }
+    return -1;
+}
+
+void RpcChannel::SendResponse(const std::string& request_id,
+                              bool ok,
+                              const std::string& error_code,
+                              const std::string& error_message,
+                              const std::string& payload,
+                              int browser_id,
+                              const std::string& frame_id,
+                              int window_id) {
+    Envelope env;
+    env.version = 1;
+    env.kind = EnvelopeKind::Response;
+    env.capability = capability_;
+    env.request_id = request_id;
+    env.browser_id = browser_id;
+    env.frame_id = frame_id;
+    env.window_id = window_id;
+    env.ok = ok;
+    env.error_code = error_code;
+    env.error_message = error_message;
+    if (!payload.empty()) {
+        env.payload = std::vector<uint8_t>(payload.begin(), payload.end());
+    }
+
+    int fd = GetClientFd(browser_id);
+    if (fd >= 0) {
+        std::vector<uint8_t> data = SerializeEnvelope(env);
+        std::string frame(data.begin(), data.end());
+        SendFrame(fd, frame);
+    }
+}
+
+void RpcChannel::SendEvent(const std::string& operation,
+                          const std::string& payload,
+                          int browser_id,
+                          const std::string& frame_id,
+                          int window_id) {
+    Envelope env;
+    env.version = 1;
+    env.kind = EnvelopeKind::Event;
+    env.capability = capability_;
+    env.browser_id = browser_id;
+    env.frame_id = frame_id;
+    env.window_id = window_id;
+    env.operation = operation;
+    if (!payload.empty()) {
+        env.payload = std::vector<uint8_t>(payload.begin(), payload.end());
+    }
+
+    if (browser_id > 0) {
+        int fd = GetClientFd(browser_id);
+        if (fd >= 0) {
+            std::vector<uint8_t> data = SerializeEnvelope(env);
+            std::string frame(data.begin(), data.end());
+            SendFrame(fd, frame);
+        }
+    } else {
+        std::lock_guard<std::mutex> lock(fd_mutex_);
+        for (const auto& [bid, fd] : browser_to_fd_) {
+            std::vector<uint8_t> data = SerializeEnvelope(env);
+            std::string frame(data.begin(), data.end());
+            SendFrame(fd, frame);
+        }
+    }
 }

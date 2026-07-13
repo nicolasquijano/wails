@@ -16,8 +16,8 @@ public:
                    int browser_id,
                    int window_id);
 
-    void SetWindow(GtkApplicationWindow* window) { window_ = window; }
     void SetBrowserId(int id) { browser_id_ = id; }
+    void SetWindow(GtkApplicationWindow* window) { window_ = window; }
 
     void SendResponse(const std::string& request_id, bool ok,
                       const std::string& error_code,
@@ -73,6 +73,7 @@ private:
 
     GtkApplicationWindow* window_ = nullptr;
     int browser_id_ = 0;
+    int window_id_ = 0;
     std::unordered_map<std::string, GtkWidget*> menus_;
     int menu_id_counter_ = 0;
 };

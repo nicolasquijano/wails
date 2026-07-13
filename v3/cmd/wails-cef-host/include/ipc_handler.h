@@ -128,3 +128,35 @@ private:
 
 Envelope ParseEnvelope(const std::vector<uint8_t>& data, std::string* err);
 std::vector<uint8_t> SerializeEnvelope(const Envelope& env);
+
+class RpcChannel {
+public:
+    static RpcChannel& Instance();
+
+    void RegisterBrowser(int browser_id, int client_fd);
+    void UnregisterBrowser(int browser_id);
+    int GetClientFd(int browser_id) const;
+
+    void SendResponse(const std::string& request_id,
+                     bool ok,
+                     const std::string& error_code,
+                     const std::string& error_message,
+                     const std::string& payload,
+                     int browser_id,
+                     const std::string& frame_id,
+                     int window_id);
+
+    void SendEvent(const std::string& operation,
+                   const std::string& payload,
+                   int browser_id = 0,
+                   const std::string& frame_id = "",
+                   int window_id = 0);
+
+    void SetCapability(const std::string& cap) { capability_ = cap; }
+
+private:
+    RpcChannel() = default;
+    std::unordered_map<int, int> browser_to_fd_;
+    mutable std::mutex fd_mutex_;
+    std::string capability_;
+};
