@@ -40,32 +40,38 @@ bool AssetResourceHandler::ProcessRequest(CefRefPtr<CefRequest> request,
     request_ = request;
     request_callback_ = callback;
 
-    CefString post_data;
-    request->GetPostData(&post_data);
-
-    std::string method = "GET";
-    if (request->GetMethod() == "POST") {
-        method = "POST";
-    }
-
-    std::string url = url_;
-    if (url.empty()) {
-        request->GetURL(url);
-    }
+    std::string method = request->GetMethod().ToString();
+    std::string req_url = request->GetURL().ToString();
 
     std::string post_str;
-    if (!post_data.empty()) {
-        post_str = post_data;
+    CefRefPtr<CefPostData> post_data = request->GetPostData();
+    if (post_data) {
+        CefPostData::ElementVector elements;
+        post_data->GetElements(elements);
+        if (!elements.empty()) {
+            for (auto& element : elements) {
+                if (element->GetType() == PDE_TYPE_BYTES) {
+                    size_t size = element->GetBytesCount();
+                    if (size > 0) {
+                        std::vector<char> buffer(size);
+                        size_t bytes_read = element->GetBytes(size, buffer.data());
+                        if (bytes_read > 0) {
+                            post_str.append(buffer.data(), bytes_read);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    parent_->SendAssetRequest(method, url, post_str, browser_id_, this);
+    parent_->SendAssetRequest(method, req_url, post_str, browser_id_, this);
     return true;
 }
 
 void AssetResourceHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
-                                          int64& response_length,
-                                          CefString& redirectUrl) {
-    if (!response_body_.empty()) {
+                                              int64_t& response_length,
+                                              CefString& redirectUrl) {
+    if (response_ready_ && !response_body_.empty()) {
         response->SetStatus(200);
         response->SetStatusText("OK");
         response->SetMimeType("text/html");
@@ -78,9 +84,9 @@ void AssetResourceHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
 }
 
 bool AssetResourceHandler::ReadResponse(void* data_out,
-                                      int bytes_to_read,
-                                      int& bytes_read,
-                                      CefRefPtr<CefCallback> callback) {
+                                       int bytes_to_read,
+                                       int& bytes_read,
+                                       CefRefPtr<CefCallback> callback) {
     if (offset_ >= response_body_.size()) {
         bytes_read = 0;
         return false;
@@ -100,34 +106,38 @@ void AssetResourceHandler::Cancel() {
     request_callback_ = nullptr;
 }
 
+void AssetResourceHandler::SetResponseBody(const std::vector<uint8_t>& body) {
+    response_body_ = body;
+    offset_ = 0;
+    response_ready_ = true;
+    if (request_callback_) {
+        request_callback_->Continue();
+        request_callback_ = nullptr;
+    }
+}
+
 AssetRequestHandler::AssetRequestHandler(const std::string& socket_path,
-                                       const std::string& capability)
+                                         const std::string& capability)
     : socket_path_(socket_path), capability_(capability) {}
 
 AssetRequestHandler::~AssetRequestHandler() {
     DisconnectFromGo();
 }
 
-CefRefPtr<CefResourceHandler> AssetRequestHandler::CreateResourceHandler(
+CefRefPtr<CefResourceHandler> AssetRequestHandler::Create(
     CefRefPtr<CefBrowser> browser,
     CefRefPtr<CefFrame> frame,
+    const CefString& scheme_name,
     CefRefPtr<CefRequest> request) {
-
-    std::string url;
-    request->GetURL(url);
-
+    std::string url = request->GetURL().ToString();
     return new AssetResourceHandler(this, browser->GetIdentifier(), url);
 }
 
-CefRefPtr<CefSchemeHandlerFactory> AssetRequestHandler::GetSchemeHandlerFactory() {
-    return this;
-}
-
 void AssetRequestHandler::SendAssetRequest(const std::string& method,
-                                        const std::string& url,
-                                        const std::string& post_data,
-                                        int browser_id,
-                                        CefRefPtr<CefResourceHandler> handler) {
+                                          const std::string& url,
+                                          const std::string& post_data,
+                                          int browser_id,
+                                          AssetResourceHandler* handler) {
     if (!ConnectToGo()) {
         return;
     }
@@ -159,13 +169,12 @@ void AssetRequestHandler::SendAssetRequest(const std::string& method,
 
     Envelope reply = ParseEnvelope(resp, nullptr);
     if (reply.kind == EnvelopeKind::Response && reply.ok) {
-        auto* asset_handler = static_cast<AssetResourceHandler*>(handler.get());
         if (!reply.payload.empty()) {
-            asset_handler->response_body_ = std::move(reply.payload);
+            handler->SetResponseBody(reply.payload);
+        } else {
+            handler->SetResponseBody({});
         }
     }
-
-    request_callback_->Continue();
 }
 
 bool AssetRequestHandler::ConnectToGo() {
@@ -229,7 +238,7 @@ void AssetRequestHandler::DisconnectFromGo() {
 }
 
 bool AssetRequestHandler::SendToGo(const std::vector<uint8_t>& data) {
-    if (client_fd_ < 0 || data.size() > kMaxPayloadSize) {
+    if (client_fd_ < 0 || data.size() > ::kMaxPayloadSize) {
         return false;
     }
 
@@ -270,7 +279,7 @@ std::vector<uint8_t> AssetRequestHandler::RecvFromGo() {
                    (static_cast<uint32_t>(header[2]) << 8) |
                    static_cast<uint32_t>(header[3]);
 
-    if (len > kMaxPayloadSize) {
+    if (len > ::kMaxPayloadSize) {
         return {};
     }
 

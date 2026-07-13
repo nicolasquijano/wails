@@ -95,3 +95,4 @@ v2/cmd/wails/internal/commands/initialise/templates/testtemplates/
 
 # Ignore local iOS test app
 /v3/testiosapp/
+v3/cmd/wails-cef-host/build/

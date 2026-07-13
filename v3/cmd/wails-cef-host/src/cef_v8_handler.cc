@@ -21,8 +21,6 @@
 
 namespace {
 
-constexpr size_t kMaxPayloadSize = 16 * 1024 * 1024;
-
 std::string GenerateRequestId() {
     static std::random_device rd;
     static std::mt19937 gen(rd());
@@ -128,8 +126,9 @@ bool V8Handler::Execute(const CefString& name,
             if (msg->IsString()) {
                 CefRefPtr<CefBrowser> browser = CefV8Context::GetCurrentContext()->GetBrowser();
                 if (browser) {
+                    std::string js = "console.log('[Go]', " + msg->GetStringValue().ToString() + ")";
                     browser->GetMainFrame()->ExecuteJavaScript(
-                        "console.log('[Go]', " + msg->GetStringValue() + ")",
+                        js,
                         "wails://native", 1);
                 }
             }
@@ -137,7 +136,7 @@ bool V8Handler::Execute(const CefString& name,
         return true;
     }
 
-    exception = "Unknown function: " + name;
+    exception = "Unknown function: " + name.ToString();
     return true;
 }
 
@@ -146,8 +145,7 @@ CefRefPtr<CefV8Value> V8Handler::CallGo(const std::string& method,
                                          CefRefPtr<CefV8Context> context,
                                          CefRefPtr<CefV8Value> callback) {
     Json::Value root;
-    Json::String parse_err;
-    if (!Json::parse(payload, &root, &parse_err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return nullptr;
     }
 
@@ -160,7 +158,7 @@ CefRefPtr<CefV8Value> V8Handler::CallGo(const std::string& method,
         std::string request_id = GenerateRequestId();
         std::string operation_payload = "{}";
         if (root.isMember("args")) {
-            operation_payload = Json::unparse(root["args"]);
+            operation_payload = Json::FastWriter().write(root["args"]);
         }
         host_adapter_->OnRequest(
             request_id, operation, operation_payload,
@@ -325,13 +323,4 @@ std::vector<uint8_t> V8Handler::RecvFromGo() {
     }
 
     return payload;
-}
-
-bool V8Extension::GetFunction(const CefString& name,
-                              CefRefPtr<CefV8Handler>& handler) {
-    if (!handler_) {
-        return false;
-    }
-    handler = handler_;
-    return true;
 }

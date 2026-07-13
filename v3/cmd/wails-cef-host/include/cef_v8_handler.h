@@ -50,20 +50,3 @@ private:
     IMPLEMENT_REFCOUNTING(V8Handler);
     DISALLOW_COPY_AND_ASSIGN(V8Handler);
 };
-
-class V8Extension : public CefV8ExtensionHandler {
-public:
-    V8Extension() = default;
-    ~V8Extension() override = default;
-
-    bool GetFunction(const CefString& name,
-                     CefRefPtr<CefV8Handler>& handler) override;
-
-    void SetHandler(CefRefPtr<V8Handler> handler) { handler_ = handler; }
-
-private:
-    CefRefPtr<V8Handler> handler_;
-
-    IMPLEMENT_REFCOUNTING(V8Extension);
-    DISALLOW_COPY_AND_ASSIGN(V8Extension);
-};

@@ -33,6 +33,7 @@ target_include_directories(wails-cef-host PRIVATE
 )
 
 target_link_libraries(wails-cef-host PRIVATE
+    ${CEF_ROOT}/build/libcef_dll_wrapper/libcef_dll_wrapper.a
     ${CEF_ROOT}/libcef.so
     PkgConfig::GTK3
     PkgConfig::GIO_UNIX_2_0

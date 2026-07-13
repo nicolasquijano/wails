@@ -5,7 +5,7 @@
 #include <memory>
 #include <unordered_map>
 
-#include <gdk/x11/gdkx.h>
+#include <gtk/gtkx.h>
 #include <gtk/gtk.h>
 
 #include <cef_client.h>
@@ -98,10 +98,9 @@ void WindowHost::EmbedBrowser(CefRefPtr<CefBrowser> browser) {
 
     size_handler_id_ = id;
 
-    guint32 socket_id = gtk_socket_get_id(GTK_SOCKET(socket));
+    Window socket_id = gtk_socket_get_id(GTK_SOCKET(socket));
     CefWindowInfo win_info;
     win_info.SetAsWindowless(socket_id);
-    host->WasShown(true);
 }
 
 void WindowHost::Close() {

@@ -1,4 +1,5 @@
 #include "host_app.h"
+#include "host_client.h"
 #include "window_host.h"
 
 #include <cstdio>
@@ -64,7 +65,7 @@ void HostApp::OnBeforeCommandLineProcessing(
 }
 
 void HostApp::OnRegisterCustomSchemes(
-    CefRefPtr<CefSchemeRegistrar> registrar) {
+    CefRawPtr<CefSchemeRegistrar> registrar) {
     if (!registrar) return;
 
     int options = kSchemeOptionStandard | kSchemeOptionCORSEnabled |
@@ -95,11 +96,8 @@ void HostApp::CreateBrowserWindow(const std::string& url) {
     browser_settings.javascript_access_clipboard = STATE_ENABLED;
     browser_settings.javascript_dom_paste = STATE_ENABLED;
     browser_settings.local_storage = STATE_ENABLED;
-    browser_settings.databases = STATE_ENABLED;
-    browser_settings.web_security = STATE_ENABLED;
+    browser_settings.databases_deprecated = STATE_ENABLED;
     browser_settings.remote_fonts = STATE_ENABLED;
-    browser_settings.minimum_zoom_level = -2.0f;
-    browser_settings.maximum_zoom_level = 2.0f;
 
     client_ = new HostClient();
 

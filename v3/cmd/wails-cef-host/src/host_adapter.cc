@@ -195,7 +195,7 @@ std::string HostAdapter::WindowSetSize(const std::string& payload) {
                                       GdkWindowHints(GDK_HINT_MIN_SIZE | GDK_HINT_MAX_SIZE));
         gtk_window_resize(GTK_WINDOW(window_), width, height);
         if (center) {
-            gtk_window_center(GTK_WINDOW(window_));
+            gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
         }
     }
 
@@ -255,14 +255,14 @@ std::string HostAdapter::WindowUnmaximize() {
 
 std::string HostAdapter::WindowMinimize() {
     if (window_) {
-        gtk_window_minimize(GTK_WINDOW(window_));
+        gtk_window_iconify(GTK_WINDOW(window_));
     }
     return "{\"minimised\": true}";
 }
 
 std::string HostAdapter::WindowRestore() {
     if (window_) {
-        gtk_window_unminimize(GTK_WINDOW(window_));
+        gtk_window_deiconify(GTK_WINDOW(window_));
     }
     return "{\"minimised\": false}";
 }
@@ -288,9 +288,12 @@ std::string HostAdapter::WindowSetAlwaysOnTop(const std::string& payload) {
 std::string HostAdapter::WindowIsMaximised() {
     Json::Value result;
     if (window_) {
-        result["maximised"] = gdk_toplevel_get_state(
-            GDK_TOPLEVEL(gtk_widget_get_parent(GTK_WIDGET(window_)))) &
-                               GDK_TOPLEVEL_STATE_MAXIMIZED;
+        GdkWindow* gwin = gtk_widget_get_window(GTK_WIDGET(window_));
+        if (gwin) {
+            result["maximised"] = gdk_window_get_state(gwin) & GDK_WINDOW_STATE_MAXIMIZED;
+        } else {
+            result["maximised"] = false;
+        }
     } else {
         result["maximised"] = false;
     }
@@ -300,9 +303,12 @@ std::string HostAdapter::WindowIsMaximised() {
 std::string HostAdapter::WindowIsMinimised() {
     Json::Value result;
     if (window_) {
-        result["minimised"] = gdk_toplevel_get_state(
-            GDK_TOPLEVEL(gtk_widget_get_parent(GTK_WIDGET(window_)))) &
-                               GDK_TOPLEVEL_STATE_MINIMIZED;
+        GdkWindow* gwin = gtk_widget_get_window(GTK_WIDGET(window_));
+        if (gwin) {
+            result["minimised"] = gdk_window_get_state(gwin) & GDK_WINDOW_STATE_ICONIFIED;
+        } else {
+            result["minimised"] = false;
+        }
     } else {
         result["minimised"] = false;
     }
@@ -312,9 +318,12 @@ std::string HostAdapter::WindowIsMinimised() {
 std::string HostAdapter::WindowIsFullscreen() {
     Json::Value result;
     if (window_) {
-        result["fullscreen"] = gdk_toplevel_get_state(
-            GDK_TOPLEVEL(gtk_widget_get_parent(GTK_WIDGET(window_)))) &
-                               GDK_TOPLEVEL_STATE_FULLSCREEN;
+        GdkWindow* gwin = gtk_widget_get_window(GTK_WIDGET(window_));
+        if (gwin) {
+            result["fullscreen"] = gdk_window_get_state(gwin) & GDK_WINDOW_STATE_FULLSCREEN;
+        } else {
+            result["fullscreen"] = false;
+        }
     } else {
         result["fullscreen"] = false;
     }
@@ -359,7 +368,7 @@ std::string HostAdapter::WindowSetResizable(const std::string& payload) {
 
 std::string HostAdapter::WindowCenter() {
     if (window_) {
-        gtk_window_center(GTK_WINDOW(window_));
+        gtk_window_set_position(GTK_WINDOW(window_), GTK_WIN_POS_CENTER);
     }
     return "{\"centered\": true}";
 }
@@ -408,7 +417,7 @@ std::string HostAdapter::DialogOpenFile(const std::string& payload) {
     if (response == GTK_RESPONSE_ACCEPT) {
         GSList* filenames = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dialog));
         if (multiple) {
-            result["files"] = Json::array();
+            result["files"] = Json::Value(Json::arrayValue);
             for (GSList* l = filenames; l; l = l->next) {
                 result["files"].append(static_cast<char*>(l->data));
                 g_free(l->data);

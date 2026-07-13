@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
     CefSettings settings;
     settings.multi_threaded_message_loop = false;
     settings.external_message_pump = true;
-    settings.no_sandbox = false;
+    settings.no_sandbox = true;
     settings.log_severity = LOGSEVERITY_INFO;
     settings.remote_debugging_port = 9999;
 
@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
         },
         nullptr, nullptr);
 
-    gint status = gtk_main();
+    gtk_main();
 
     g_source_remove(pump_source);
 
@@ -116,5 +116,5 @@ int main(int argc, char** argv) {
     }
 
     CefShutdown();
-    return status;
+    return 0;
 }

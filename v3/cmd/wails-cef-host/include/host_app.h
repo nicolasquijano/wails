@@ -17,33 +17,11 @@ public:
         CefRefPtr<CefCommandLine> command_line) override;
 
     void OnRegisterCustomSchemes(
-        CefRefPtr<CefSchemeRegistrar> registrar) override;
+        CefRawPtr<CefSchemeRegistrar> registrar) override;
 
     CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override;
 
     void OnContextInitialized() override;
-
-    void OnSchedulePrintJob(const CefString& cookie_name,
-                           const CefString& job_id) override {}
-
-    void OnPdfPrintFinished(const CefString& cookie_name,
-                           bool success) override {}
-
-    bool OnBeforePrintJob(CefRefPtr<CefBrowser> browser,
-                         const CefString& cookie_name,
-                         CefRefPtr<CefPrintHandler> handler) override {
-        return false;
-    }
-
-    void OnPrintOptions(CefRefPtr<CefBrowser> browser,
-                       CefRefPtr<CefPrintOptions> options) override {}
-
-    void GetPrintSettings(CefRefPtr<CefPrintSettings> settings) override {}
-
-    void RunFileDialog(CefRefPtr<CefBrowser> browser,
-                      const CefString& cookie_name) override {}
-
-    void OnResetPrintState(CefRefPtr<CefBrowser> browser) override {}
 
     CefRefPtr<CefClient> GetDefaultClient() override;
 

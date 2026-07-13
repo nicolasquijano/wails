@@ -185,7 +185,7 @@ bool UnixSocketServer::Listen() {
     chmod(path_.c_str(), 0600);
 
     GIOChannel* channel = g_io_channel_unix_new(server_fd_);
-    source_id_ = g_io_add_watch(channel, G_IO_IN | G_IO_ERR | G_IO_HUP,
+    source_id_ = g_io_add_watch(channel, static_cast<GIOCondition>(G_IO_IN | G_IO_ERR | G_IO_HUP),
                                  OnIOChannel, this);
     g_io_channel_unref(channel);
 
@@ -309,7 +309,7 @@ Envelope ParseEnvelope(const std::vector<uint8_t>& data, std::string* err) {
 
     Json::Value root;
     Json::String parse_err;
-    if (!Json::parse(std::string(data.begin(), data.end()), &root, &parse_err)) {
+    if (!Json::Reader().parse(std::string(data.begin(), data.end()), root)) {
         if (err) *err = "JSON parse error: " + parse_err;
         return env;
     }
@@ -363,7 +363,7 @@ std::vector<uint8_t> SerializeEnvelope(const Envelope& env) {
         root["payload"] = Json::Value(std::string(env.payload.begin(), env.payload.end()));
     }
 
-    std::string json = Json::unparse(root);
+    std::string json = Json::FastWriter().write(root);
     return std::vector<uint8_t>(json.begin(), json.end());
 }
 
