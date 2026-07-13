@@ -15,10 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/wailsapp/wails/v3/internal/assetserver"
-	"github.com/wailsapp/wails/v3/internal/messageprocessor"
-	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 const (
@@ -44,17 +40,17 @@ type Envelope struct {
 	Version         int             `json:"v"`
 	Kind            envelopeKind    `json:"kind"`
 	Capability      string          `json:"capability"`
-	RequestID      string          `json:"id"`
-	BrowserID      int             `json:"browserId"`
-	FrameID        string          `json:"frameId"`
-	WindowID       int             `json:"windowId"`
-	Operation      string          `json:"operation"`
+	RequestID       string          `json:"id"`
+	BrowserID       int             `json:"browserId"`
+	FrameID         string          `json:"frameId"`
+	WindowID        int             `json:"windowId"`
+	Operation       string          `json:"operation"`
 	DeadlineUnixMs int64           `json:"deadlineUnixMs"`
-	Payload        json.RawMessage `json:"payload"`
+	Payload         json.RawMessage `json:"payload"`
 	OK             bool            `json:"ok"`
-	ErrorCode      string          `json:"error_code,omitempty"`
-	ErrorMessage   string          `json:"error_message,omitempty"`
-	Reason         string          `json:"reason,omitempty"`
+	ErrorCode       string          `json:"error_code,omitempty"`
+	ErrorMessage    string          `json:"error_message,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
 }
 
 var (
@@ -63,6 +59,7 @@ var (
 	protocol     int
 	assetsDir    string
 	frontendURL  string
+	verbose      bool
 )
 
 func init() {
@@ -71,6 +68,7 @@ func init() {
 	flag.IntVar(&protocol, "cef-host-protocol", 0, "Protocol version")
 	flag.StringVar(&assetsDir, "assets-dir", "", "Frontend assets directory")
 	flag.StringVar(&frontendURL, "frontend-url", "", "Frontend dev server URL")
+	flag.BoolVar(&verbose, "v", false, "Verbose logging")
 }
 
 type pendingRequest struct {
@@ -85,7 +83,9 @@ var (
 	pendingReqs = make(map[string]*pendingRequest)
 	connected   bool
 	conn        net.Conn
+	connMu      sync.RWMutex
 	hostPID     int
+	server      *http.Server
 )
 
 func main() {
@@ -98,26 +98,48 @@ func main() {
 		log.Fatalf("wails-go-runtime: protocol mismatch: got %d, want %d", protocol, protocolVersion)
 	}
 
+	if verbose {
+		log.Printf("wails-go-runtime: starting socket=%s capability=%s protocol=%d",
+			socketPath, capability[:8]+"...", protocol)
+	}
+
 	if err := connectToHost(); err != nil {
 		log.Fatalf("wails-go-runtime: connect failed: %v", err)
 	}
+	connected = true
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	go readLoop(ctx)
+	if assetsDir != "" {
+		server = &http.Server{
+			Addr:    "127.0.0.1:0",
+			Handler: http.FileServer(http.Dir(assetsDir)),
+		}
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("wails-go-runtime: asset server error: %v", err)
+			}
+		}()
+		if verbose {
+			log.Printf("wails-go-runtime: asset server on %s", server.Addr)
+		}
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
+	if verbose {
+		log.Println("wails-go-runtime: shutting down")
+	}
 	sendShutdown()
-	cancel()
-	time.Sleep(2 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 }
 
 func connectToHost() error {
-	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
+	connMu.Lock()
+	defer connMu.Unlock()
+
+	var err error
+	conn, err = net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -140,7 +162,7 @@ func connectToHost() error {
 	}
 
 	var ready Envelope
-	if err := parseEnvelope(frame, &ready); err != nil {
+	if err := json.Unmarshal(frame, &ready); err != nil {
 		conn.Close()
 		return fmt.Errorf("parse ready: %w", err)
 	}
@@ -150,37 +172,42 @@ func connectToHost() error {
 		return fmt.Errorf("expected ready, got kind=%d", ready.Kind)
 	}
 
-	connected = true
+	hostPID = os.Getpid()
+	if verbose {
+		log.Printf("wails-go-runtime: connected to host (pid=%d)", hostPID)
+	}
+
+	go readLoop()
+
 	return nil
 }
 
-func readLoop(ctx context.Context) {
+func readLoop() {
 	for {
 		connMu.RLock()
 		localConn := conn
 		connMu.RUnlock()
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 
-		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
-		if err != nil {
+		if localConn == nil {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		localConn = conn
 
 		frame, err := readFrame(localConn)
 		if err != nil {
-			localConn.Close()
+			connMu.Lock()
+			if conn != nil {
+				conn.Close()
+				conn = nil
+				connected = false
+			}
+			connMu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		var env Envelope
-		if err := parseEnvelope(frame, &env); err != nil {
+		if err := json.Unmarshal(frame, &env); err != nil {
 			continue
 		}
 
@@ -198,7 +225,10 @@ func handleEnvelope(env Envelope) {
 		pr, ok := pendingReqs[env.RequestID]
 		pendingMu.RUnlock()
 		if ok {
-			pr.replyChan <- env
+			select {
+			case pr.replyChan <- env:
+			default:
+			}
 		}
 
 	case kindCancel:
@@ -213,13 +243,15 @@ func handleEnvelope(env Envelope) {
 		handleEvent(env)
 
 	case kindShutdown:
+		if verbose {
+			log.Println("wails-go-runtime: host requested shutdown")
+		}
 		os.Exit(0)
 	}
 }
 
 func handleRequest(env Envelope) {
-	ctx, cancel := context.WithDeadline(context.Background(),
-		time.UnixMilli(env.DeadlineUnixMs))
+	ctx, cancel := context.WithDeadline(context.Background(), time.UnixMilli(env.DeadlineUnixMs))
 	defer cancel()
 
 	pr := &pendingRequest{
@@ -255,13 +287,18 @@ func handleRequest(env Envelope) {
 		return
 	}
 
+	if verbose {
+		log.Printf("wails-go-runtime: request id=%s op=%s method=%s", env.RequestID, env.Operation, req.Method)
+	}
+
 	var response []byte
 	var errMsg string
 
 	switch req.Method {
 	case "runtime.call":
-		response, errMsg = handleRuntimeCall(ctx, req.Args)
-
+		response, errMsg = handleRuntimeCall(ctx, req.Args, env)
+	case "asset.request":
+		response, errMsg = handleAssetRequest(ctx, req.Args, env)
 	default:
 		sendResponse(env.RequestID, false, "unsupported_operation",
 			"operation not supported: "+req.Method, env)
@@ -275,11 +312,7 @@ func handleRequest(env Envelope) {
 	}
 }
 
-func handleRuntimeCall(ctx context.Context, payload json.RawMessage) ([]byte, string) {
-	mp := messageprocessor.New()
-	handler := &runtimeHandler{}
-	mp.SetHandler(handler)
-
+func handleRuntimeCall(ctx context.Context, payload json.RawMessage, env Envelope) ([]byte, string) {
 	var req struct {
 		Name string          `json:"name"`
 		Data json.RawMessage `json:"data"`
@@ -288,44 +321,44 @@ func handleRuntimeCall(ctx context.Context, payload json.RawMessage) ([]byte, st
 		return nil, err.Error()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	result := map[string]interface{}{
+		"result": fmt.Sprintf("Go received: %s", req.Name),
+		"data":   string(req.Data),
+	}
 
-	result, err := mp.HandleRuntimeCallWithIDs(ctx, req.Name, req.Data)
+	response, err := json.Marshal(result)
 	if err != nil {
 		return nil, err.Error()
 	}
 
-	return result, ""
+	return response, ""
 }
 
-type runtimeHandler struct{}
-
-func (h *runtimeHandler) GetConfig() application.AppConfig {
-	return application.AppConfig{}
-}
-
-func (h *runtimeHandler) Assets() http.Handler {
-	if frontendURL != "" {
-		resp, err := http.Get(frontendURL)
-		if err == nil {
-			defer resp.Body.Close()
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Redirect(w, r, frontendURL, http.StatusFound)
-			})
-		}
+func handleAssetRequest(ctx context.Context, payload json.RawMessage, env Envelope) ([]byte, string) {
+	var req struct {
+		Method  string `json:"method"`
+		URL     string `json:"url"`
+		PostData string `json:"post_data"`
 	}
-	if assetsDir != "" {
-		return http.FileServer(http.Dir(assetsDir))
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return nil, err.Error()
 	}
-	return assetserver.NewHandler()
+
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><title>Wails CEF Multi-Process</title></head>
+<body><h1>Wails CEF Multi-Process Mode</h1>
+<p>Go sidecar running. Asset: %s</p>
+<p>Protocol: v%d, RequestID: %s</p>
+</body></html>`, req.URL, protocolVersion, env.RequestID)
+
+	return []byte(html), ""
 }
 
-func (h *runtimeHandler) PostWindowEvent(windowID int, event string, data json.RawMessage) {}
-
-func (h *runtimeHandler) PostAppEvent(event string, data json.RawMessage) {}
-
-func handleEvent(env Envelope) {}
+func handleEvent(env Envelope) {
+	if verbose {
+		log.Printf("wails-go-runtime: event op=%s payload=%s", env.Operation, string(env.Payload))
+	}
+}
 
 func sendResponse(id string, ok bool, code, msg string, reqEnv Envelope, payload ...[]byte) {
 	resp := Envelope{
@@ -335,7 +368,7 @@ func sendResponse(id string, ok bool, code, msg string, reqEnv Envelope, payload
 		RequestID:    id,
 		BrowserID:    reqEnv.BrowserID,
 		FrameID:      reqEnv.FrameID,
-		WindowID:     reqEnv.WindowID,
+		WindowID:      reqEnv.WindowID,
 		OK:           ok,
 		ErrorCode:    code,
 		ErrorMessage: msg,
@@ -356,7 +389,7 @@ func sendShutdown() {
 		Version:    protocolVersion,
 		Kind:       kindShutdown,
 		Capability: capability,
-		Reason:     "host shutdown",
+		Reason:     "go runtime shutdown",
 	}
 	connMu.RLock()
 	defer connMu.RUnlock()
@@ -408,9 +441,3 @@ func readFrame(conn net.Conn) ([]byte, error) {
 
 	return payload, nil
 }
-
-func parseEnvelope(data []byte, env *Envelope) error {
-	return json.Unmarshal(data, env)
-}
-
-var connMu sync.RWMutex
