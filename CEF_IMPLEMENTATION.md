@@ -413,7 +413,7 @@ it is not a generic Node executable serving as CEF's host.
 - Unix-socket permissions, token authentication, malformed messages, timeout,
   cancellation, shutdown and child-process reaping have automated coverage.
 
-**Status**: 🔄 IN PROGRESS — M1 (native host skeleton) and M2 (Go sidecar) started 2026-07-13.
+**Status**: 🔄 IN PROGRESS — M1-M6 complete, M7 (build and package) pending.
 
 ## Implementation Progress (Decision C18)
 
@@ -465,12 +465,15 @@ v3/cmd/wails-go-runtime/
 - Routes to Go sidecar via Unix socket RPC
 - Generates unique request IDs for async call tracking
 
-### M6 — Native feature parity 🔄 IN PROGRESS (2026-07-13)
+### M6 — Native feature parity ✅ COMPLETE (2026-07-13)
 - HostAdapter class implements `host.window.*`, `host.dialog.*`, `host.clipboard.*`, `host.menu.*` operations
 - Window operations: setTitle, getSize, setSize, getPosition, setPosition, maximise, unmaximise, minimise, restore, setAlwaysOnTop, isMaximised, isMinimised, isFullscreen, setDecorations, setResizable, center
 - Dialog operations: openFile, saveFile, message
 - Clipboard operations: readText, writeText
 - Menu operations: create, popup, destroy
+- RpcChannel singleton for browser_id → client_fd mapping and response/event routing
+- V8Handler routes host.* operations to HostAdapter, forwards others to Go sidecar
+- JSON framing for IPC (ParseEnvelope/SerializeEnvelope using jsoncpp)
 - CMakeLists.txt updated with jsoncpp dependency
 
 ### M7 — Build and package 📋 PENDING
