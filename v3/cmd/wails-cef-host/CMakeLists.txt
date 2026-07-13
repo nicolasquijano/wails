@@ -19,6 +19,8 @@ add_executable(wails-cef-host
     src/window_host.h
     src/ipc_handler.cc
     src/ipc_handler.h
+    src/cef_resource_handler.cc
+    src/cef_resource_handler.h
 )
 
 target_include_directories(wails-cef-host PRIVATE

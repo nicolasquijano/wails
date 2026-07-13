@@ -454,8 +454,11 @@ v3/cmd/wails-go-runtime/
 - Ready response sent after successful validation
 - AuthenticatedListener class wraps SocketListener with validation
 
-### M4 — Asset and startup path 📋 PENDING
-- C++ ResourceRequestHandler proxies `wails://` to Go asset service
+### M4 — Asset and startup path 🔄 IN PROGRESS (2026-07-13)
+- C++ AssetRequestHandler + AssetResourceHandler for `wails://` scheme
+- Proxies requests to Go sidecar via Unix socket RPC
+- CefSchemeHandlerFactory for custom scheme registration
+- ReadResponse streaming with offset tracking
 
 ### M5 — Async bindings 📋 PENDING
 - V8 extension → C++ host → Go MessageProcessor over RPC
@@ -603,10 +606,12 @@ Wiring:
 | `v3/cmd/wails-cef-host/include/host_app.h` | cefApp + cefBrowserProcessHandler declarations |
 | `v3/cmd/wails-cef-host/include/window_host.h` | GTK/X11 window embedding wrapper |
 | `v3/cmd/wails-cef-host/include/ipc_handler.h` | Unix socket RPC framing + envelope types |
+| `v3/cmd/wails-cef-host/include/cef_resource_handler.h` | AssetRequestHandler + ResourceHandler declarations |
 | `v3/cmd/wails-cef-host/src/main.cc` | CefExecuteProcess + gtk_main + message pump |
 | `v3/cmd/wails-cef-host/src/host_app.cc` | CEF app init, command-line switches, scheme registration |
 | `v3/cmd/wails-cef-host/src/window_host.cc` | GtkSocket → CEF view embedding + resize |
-| `v3/cmd/wails-cef-host/src/ipc_handler.cc` | Envelope serialization, Unix socket server |
+| `v3/cmd/wails-cef-host/src/ipc_handler.cc` | Envelope serialization, Unix socket server + AuthenticatedListener |
+| `v3/cmd/wails-cef-host/src/cef_resource_handler.cc` | Asset scheme handler proxied to Go sidecar |
 | `v3/cmd/wails-go-runtime/go.mod` | Go sidecar module |
 | `v3/cmd/wails-go-runtime/main.go` | Socket client, MessageProcessor bridge, envelope framing |
 
