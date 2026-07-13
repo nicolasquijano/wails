@@ -69,8 +69,23 @@ private:
 class SocketListener {
 public:
     virtual ~SocketListener() = default;
-    virtual void OnFrame(std::vector<uint8_t>&& frame) = 0;
+    virtual void OnFrame(int client_fd, std::vector<uint8_t>&& frame) = 0;
     virtual void OnError(const std::string& msg) = 0;
+};
+
+class AuthenticatedListener : public SocketListener {
+public:
+    AuthenticatedListener(const std::string& expected_capability, uid_t expected_uid);
+    void OnFrame(int client_fd, std::vector<uint8_t>&& frame) override;
+    void OnError(const std::string& msg) override;
+    void SetNext(SocketListener* next) { next_ = next; }
+
+private:
+    bool ValidateAndDispatch(int client_fd, std::vector<uint8_t>&& frame);
+
+    std::string expected_capability_;
+    uid_t expected_uid_;
+    SocketListener* next_ = nullptr;
 };
 
 bool SendFrame(int fd, std::string_view frame);

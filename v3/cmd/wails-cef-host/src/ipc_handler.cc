@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
@@ -11,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/ucred.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <vector>
@@ -22,8 +25,11 @@ namespace {
 
 constexpr uint8_t kFrameHeaderSize = 4;
 
-std::string FormatError(const std::string& context, int err) {
-    return context + ": " + strerror(err);
+std::string FormatError(const char* context, int err) {
+    std::string result = context;
+    result += ": ";
+    result += strerror(err);
+    return result;
 }
 
 bool SetCloseOnExec(int fd) {
@@ -217,12 +223,79 @@ gboolean UnixSocketServer::OnIOChannel(GIOChannel* source, GIOCondition conditio
         return G_SOURCE_CONTINUE;
     }
 
-    std::vector<uint8_t> frame = RecvFrame(client_fd, nullptr);
+    std::string err;
+    std::vector<uint8_t> frame = RecvFrame(client_fd, &err);
     if (!frame.empty()) {
-        server->listener_->OnFrame(std::move(frame));
+        server->listener_->OnFrame(client_fd, std::move(frame));
+    } else if (!err.empty()) {
+        server->listener_->OnError(err);
     }
 
     return G_SOURCE_CONTINUE;
+}
+
+AuthenticatedListener::AuthenticatedListener(const std::string& expected_capability, uid_t expected_uid)
+    : expected_capability_(expected_capability), expected_uid_(expected_uid) {}
+
+void AuthenticatedListener::OnFrame(int client_fd, std::vector<uint8_t>&& frame) {
+    ValidateAndDispatch(client_fd, std::move(frame));
+}
+
+void AuthenticatedListener::OnError(const std::string& msg) {
+    if (next_) {
+        next_->OnError(msg);
+    }
+}
+
+bool AuthenticatedListener::ValidateAndDispatch(int client_fd, std::vector<uint8_t>&& frame) {
+    Envelope env = ParseEnvelope(frame, nullptr);
+
+    if (env.kind != EnvelopeKind::Hello) {
+        if (next_) {
+            next_->OnError("expected hello, got kind=" + std::to_string(static_cast<int>(env.kind)));
+        }
+        return false;
+    }
+
+    struct ucred cred;
+    socklen_t cred_len = sizeof(cred);
+    if (getsockopt(client_fd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) < 0) {
+        if (next_) {
+            next_->OnError("SO_PEERCRED failed: " + std::string(strerror(errno)));
+        }
+        return false;
+    }
+
+    if (cred.uid != expected_uid_) {
+        if (next_) {
+            next_->OnError("uid mismatch: got " + std::to_string(cred.uid) +
+                          ", expected " + std::to_string(expected_uid_));
+        }
+        return false;
+    }
+
+    if (!expected_capability_.empty() && env.capability != expected_capability_) {
+        if (next_) {
+            next_->OnError("capability mismatch");
+        }
+        return false;
+    }
+
+    Envelope ready;
+    ready.version = 1;
+    ready.kind = EnvelopeKind::Ready;
+    ready.capability = expected_capability_;
+    ready.payload = std::vector<uint8_t>(std::to_string(getpid()).begin(),
+                                         std::to_string(getpid()).end());
+
+    std::vector<uint8_t> resp = SerializeEnvelope(ready);
+    SendFrame(client_fd, std::string(resp.begin(), resp.end()));
+
+    if (next_) {
+        next_->OnFrame(client_fd, std::move(frame));
+    }
+
+    return true;
 }
 
 Envelope ParseEnvelope(const std::vector<uint8_t>& data, std::string* err) {
