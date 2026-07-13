@@ -6,6 +6,8 @@
 #include <string>
 #include <unordered_map>
 
+class HostAdapter;
+
 class V8Handler : public CefV8Handler {
 public:
     V8Handler(const std::string& socket_path, const std::string& capability);
@@ -18,12 +20,16 @@ public:
                  CefString& exception) override;
 
     void SetBrowser(int browser_id);
+    void SetWindowId(int window_id) { window_id_ = window_id; }
+    void SetHostAdapter(HostAdapter* adapter) { host_adapter_ = adapter; }
 
 private:
     std::string socket_path_;
     std::string capability_;
     int browser_id_ = 0;
+    int window_id_ = 0;
     int client_fd_ = -1;
+    HostAdapter* host_adapter_ = nullptr;
 
     bool ConnectToGo();
     void DisconnectFromGo();
@@ -53,7 +59,7 @@ public:
     bool GetFunction(const CefString& name,
                      CefRefPtr<CefV8Handler>& handler) override;
 
-    void V8Handler::SetBrowser(int browser_id);
+    void SetHandler(CefRefPtr<V8Handler> handler) { handler_ = handler; }
 
 private:
     CefRefPtr<V8Handler> handler_;

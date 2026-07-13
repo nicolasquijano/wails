@@ -1,4 +1,5 @@
 #include "cef_v8_handler.h"
+#include "host_adapter.h"
 
 #include <cstring>
 #include <fcntl.h>
@@ -14,6 +15,8 @@
 #include <include/cef_frame.h>
 #include <include/cef_runnable.h>
 #include <include/cef_task.h>
+
+#include <json/json.h>
 
 #include "ipc_handler.h"
 
@@ -143,6 +146,28 @@ CefRefPtr<CefV8Value> V8Handler::CallGo(const std::string& method,
                                          const std::string& payload,
                                          CefRefPtr<CefV8Context> context,
                                          CefRefPtr<CefV8Value> callback) {
+    Json::Value root;
+    Json::String parse_err;
+    if (!Json::parse(payload, &root, &parse_err)) {
+        return nullptr;
+    }
+
+    std::string operation;
+    if (root.isMember("method")) {
+        operation = root["method"].asString();
+    }
+
+    if (operation.rfind("host.", 0) == 0 && host_adapter_) {
+        std::string request_id = GenerateRequestId();
+        std::string operation_payload = "{}";
+        if (root.isMember("args")) {
+            operation_payload = Json::unparse(root["args"]);
+        }
+        host_adapter_->OnRequest(
+            request_id, operation, operation_payload,
+            browser_id_, window_id_);
+        return CefV8Value::CreateString("{\"result\":\"ok\"}");
+    }
 
     if (!ConnectToGo()) {
         return nullptr;
@@ -175,12 +200,13 @@ CefRefPtr<CefV8Value> V8Handler::CallGo(const std::string& method,
     }
 
     Envelope reply = ParseEnvelope(resp, nullptr);
+    CefRefPtr<CefV8Value> result_val;
     if (reply.kind == EnvelopeKind::Response && reply.ok) {
-        std::string result(reply.payload.begin(), reply.payload.end());
-        retval = CefV8Value::CreateString(result);
+        std::string result_str(reply.payload.begin(), reply.payload.end());
+        result_val = CefV8Value::CreateString(result_str);
     }
 
-    return retval;
+    return result_val;
 }
 
 bool V8Handler::ConnectToGo() {
