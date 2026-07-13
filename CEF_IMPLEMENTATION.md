@@ -427,7 +427,7 @@ it is not a generic Node executable serving as CEF's host.
 **Files created**:
 ```
 v3/cmd/wails-cef-host/
-├── CMakeLists.txt           # C++20, links CEF + GTK4 + X11
+├── CMakeLists.txt           # C++20, links CEF + GTK4 + X11 + jsoncpp
 ├── include/
 │   ├── host_app.h           # cefApp + cefBrowserProcessHandler
 │   ├── window_host.h       # GTK/X11 window host wrapper
@@ -465,8 +465,13 @@ v3/cmd/wails-go-runtime/
 - Routes to Go sidecar via Unix socket RPC
 - Generates unique request IDs for async call tracking
 
-### M6 — Native feature parity 📋 PENDING
-- window, dialogs, menus, clipboard, DnD
+### M6 — Native feature parity 🔄 IN PROGRESS (2026-07-13)
+- HostAdapter class implements `host.window.*`, `host.dialog.*`, `host.clipboard.*`, `host.menu.*` operations
+- Window operations: setTitle, getSize, setSize, getPosition, setPosition, maximise, unmaximise, minimise, restore, setAlwaysOnTop, isMaximised, isMinimised, isFullscreen, setDecorations, setResizable, center
+- Dialog operations: openFile, saveFile, message
+- Clipboard operations: readText, writeText
+- Menu operations: create, popup, destroy
+- CMakeLists.txt updated with jsoncpp dependency
 
 ### M7 — Build and package 📋 PENDING
 ### M8 — Promotion 📋 PENDING
