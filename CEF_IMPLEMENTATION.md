@@ -460,8 +460,10 @@ v3/cmd/wails-go-runtime/
 - CefSchemeHandlerFactory for custom scheme registration
 - ReadResponse streaming with offset tracking
 
-### M5 — Async bindings 📋 PENDING
-- V8 extension → C++ host → Go MessageProcessor over RPC
+### M5 — Async bindings 🔄 IN PROGRESS (2026-07-13)
+- C++ V8Handler receives JS calls (wails_invoke, wails_invokeAsync, wails_callback, wails_log)
+- Routes to Go sidecar via Unix socket RPC
+- Generates unique request IDs for async call tracking
 
 ### M6 — Native feature parity 📋 PENDING
 - window, dialogs, menus, clipboard, DnD
@@ -612,6 +614,8 @@ Wiring:
 | `v3/cmd/wails-cef-host/src/window_host.cc` | GtkSocket → CEF view embedding + resize |
 | `v3/cmd/wails-cef-host/src/ipc_handler.cc` | Envelope serialization, Unix socket server + AuthenticatedListener |
 | `v3/cmd/wails-cef-host/src/cef_resource_handler.cc` | Asset scheme handler proxied to Go sidecar |
+| `v3/cmd/wails-cef-host/include/cef_v8_handler.h` | V8Handler declarations for JS→Go IPC |
+| `v3/cmd/wails-cef-host/src/cef_v8_handler.cc` | V8Handler implementation: wails_invoke, wails_invokeAsync, wails_callback, wails_log |
 | `v3/cmd/wails-go-runtime/go.mod` | Go sidecar module |
 | `v3/cmd/wails-go-runtime/main.go` | Socket client, MessageProcessor bridge, envelope framing |
 
