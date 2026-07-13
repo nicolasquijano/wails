@@ -4,9 +4,9 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M5 complete, M6 (native feature parity) pending.
+**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M6 complete. C++ host (`wails-cef-host`) compiles and links successfully with CEF 147; runtime validation via `cef-hello` demo example.
 
-**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge) all complete. M6 (native feature parity) pending.
+**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity) all complete.
 
 **Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
