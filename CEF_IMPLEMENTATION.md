@@ -446,10 +446,13 @@ v3/cmd/wails-go-runtime/
 └── main.go                 # Unix socket client, MessageProcessor bridge, envelope framing
 ```
 
-### M3 — Secure transport 📋 PENDING
+### M3 — Secure transport ✅ COMPLETE (2026-07-13)
 - Unix socket server in C++ (listening)
 - Go client connects with hello/ready handshake
-- Capability token validation on every frame
+- SO_PEERCRED validation: peer UID must match host UID
+- Capability token validation on hello envelope
+- Ready response sent after successful validation
+- AuthenticatedListener class wraps SocketListener with validation
 
 ### M4 — Asset and startup path 📋 PENDING
 - C++ ResourceRequestHandler proxies `wails://` to Go asset service
