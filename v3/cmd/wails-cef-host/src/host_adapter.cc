@@ -146,7 +146,7 @@ void HostAdapter::HandleMenuOperation(const std::string& request_id,
 std::string HostAdapter::WindowSetTitle(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -157,7 +157,7 @@ std::string HostAdapter::WindowSetTitle(const std::string& payload) {
 
     Json::Value result;
     result["title"] = title;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowGetSize() {
@@ -171,13 +171,13 @@ std::string HostAdapter::WindowGetSize() {
         result["width"] = 0;
         result["height"] = 0;
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowSetSize(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -202,7 +202,7 @@ std::string HostAdapter::WindowSetSize(const std::string& payload) {
     Json::Value result;
     result["width"] = width;
     result["height"] = height;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowGetPosition() {
@@ -216,13 +216,13 @@ std::string HostAdapter::WindowGetPosition() {
         result["x"] = 0;
         result["y"] = 0;
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowSetPosition(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -236,7 +236,7 @@ std::string HostAdapter::WindowSetPosition(const std::string& payload) {
     Json::Value result;
     result["x"] = x;
     result["y"] = y;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowMaximize() {
@@ -270,7 +270,7 @@ std::string HostAdapter::WindowRestore() {
 std::string HostAdapter::WindowSetAlwaysOnTop(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -282,7 +282,7 @@ std::string HostAdapter::WindowSetAlwaysOnTop(const std::string& payload) {
 
     Json::Value result;
     result["onTop"] = on_top;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowIsMaximised() {
@@ -294,7 +294,7 @@ std::string HostAdapter::WindowIsMaximised() {
     } else {
         result["maximised"] = false;
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowIsMinimised() {
@@ -306,7 +306,7 @@ std::string HostAdapter::WindowIsMinimised() {
     } else {
         result["minimised"] = false;
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowIsFullscreen() {
@@ -318,13 +318,13 @@ std::string HostAdapter::WindowIsFullscreen() {
     } else {
         result["fullscreen"] = false;
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowSetDecorations(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -336,13 +336,13 @@ std::string HostAdapter::WindowSetDecorations(const std::string& payload) {
 
     Json::Value result;
     result["decorated"] = decorated;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowSetResizable(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -354,7 +354,7 @@ std::string HostAdapter::WindowSetResizable(const std::string& payload) {
 
     Json::Value result;
     result["resizable"] = resizable;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::WindowCenter() {
@@ -367,7 +367,7 @@ std::string HostAdapter::WindowCenter() {
 std::string HostAdapter::DialogOpenFile(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -426,13 +426,13 @@ std::string HostAdapter::DialogOpenFile(const std::string& payload) {
     gtk_widget_destroy(dialog);
 
     result["cancelled"] = (response != GTK_RESPONSE_ACCEPT);
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::DialogSaveFile(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -465,13 +465,13 @@ std::string HostAdapter::DialogSaveFile(const std::string& payload) {
     gtk_widget_destroy(dialog);
 
     result["cancelled"] = (response != GTK_RESPONSE_ACCEPT);
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::DialogMessage(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -505,7 +505,7 @@ std::string HostAdapter::DialogMessage(const std::string& payload) {
 
     Json::Value result;
     result["dismissed"] = true;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::ClipboardReadText() {
@@ -518,13 +518,13 @@ std::string HostAdapter::ClipboardReadText() {
     } else {
         result["text"] = "";
     }
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::ClipboardWriteText(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -535,13 +535,13 @@ std::string HostAdapter::ClipboardWriteText(const std::string& payload) {
 
     Json::Value result;
     result["written"] = true;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::MenuCreate(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -552,13 +552,13 @@ std::string HostAdapter::MenuCreate(const std::string& payload) {
 
     Json::Value result;
     result["id"] = id;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::MenuPopup(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -571,17 +571,17 @@ std::string HostAdapter::MenuPopup(const std::string& payload) {
         return "{\"error\": \"menu not found\"}";
     }
 
-    gtk_menu_popup_at_point(GTK_MENU(it->second), nullptr, nullptr);
+    gtk_menu_popup_at_widget(GTK_MENU(it->second), GTK_WIDGET(window_), GDK_GRAVITY_SOUTH_WEST, GDK_GRAVITY_NORTH_WEST, nullptr);
 
     Json::Value result;
     result["shown"] = true;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 std::string HostAdapter::MenuDestroy(const std::string& payload) {
     Json::Value root;
     Json::String err;
-    if (!Json::parse(payload, &root, &err)) {
+    if (!Json::Reader().parse(payload, root)) {
         return "{\"error\": \"invalid JSON\"}";
     }
 
@@ -595,7 +595,7 @@ std::string HostAdapter::MenuDestroy(const std::string& payload) {
 
     Json::Value result;
     result["destroyed"] = true;
-    return Json::unparse(result);
+    return Json::FastWriter().write(result);
 }
 
 void HostAdapter::SendResponse(const std::string& request_id, bool ok,

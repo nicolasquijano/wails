@@ -6,6 +6,7 @@
 #include <include/cef_frame.h>
 #include <include/cef_process_message.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>

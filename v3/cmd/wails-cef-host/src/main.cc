@@ -12,15 +12,14 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
-#include <sys/ucred.h>
 #include <unistd.h>
 
 #include <gio/gunixsocketaddress.h>
 #include <glib.h>
 
-#include <include/cef_app.h>
-#include <include/cef_client.h>
-#include <include/cef_scheme.h>
+#include <cef_app.h>
+#include <cef_client.h>
+#include <cef_scheme.h>
 
 #include "host_app.h"
 #include "window_host.h"

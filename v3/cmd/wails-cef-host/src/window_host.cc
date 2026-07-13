@@ -5,13 +5,13 @@
 #include <memory>
 #include <unordered_map>
 
-#include <gdk/gdkx.h>
+#include <gdk/x11/gdkx.h>
 #include <gtk/gtk.h>
 
-#include <include/cef_client.h>
-#include <include/cef_browser.h>
-#include <include/cef_frame.h>
-#include <include/cef_task.h>
+#include <cef_client.h>
+#include <cef_browser.h>
+#include <cef_frame.h>
+#include <cef_task.h>
 
 namespace {
 

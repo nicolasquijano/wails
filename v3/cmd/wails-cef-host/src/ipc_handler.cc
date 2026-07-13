@@ -13,7 +13,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/ucred.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <vector>

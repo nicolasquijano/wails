@@ -16,13 +16,12 @@
 
 #include <gtk/gtk.h>
 
-#include <include/cef_app.h>
-#include <include/cef_browser.h>
-#include <include/cef_client.h>
-#include <include/cef_command_line.h>
-#include <include/cef_frame.h>
-#include <include/cef_scheme.h>
-#include <include/cef_web_plugin.h>
+#include <cef_app.h>
+#include <cef_browser.h>
+#include <cef_client.h>
+#include <cef_command_line.h>
+#include <cef_frame.h>
+#include <cef_scheme.h>
 
 namespace {
 
