@@ -4,9 +4,11 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-11)**: All four phases complete. CEF embedding, basic app support, IPC/runtime, and features/polish all implemented. Window management from JS verified end-to-end via puppeteer CDP. System dialogs wired with graceful fallback (renderer-initiated works, Go-initiated disabled due to single-process SIGSEGV — see Decision C10). Three working demos: `cef-hello`, `cef-multiwin`, `cef-shadcn-admin`.
+**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1 (native C++ host skeleton) and M2 (Go sidecar) started.
 
-**Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready — no upstream framework (Electron, Energy, etc.) ships it. The detached-window approach created an unresponsive GTK host window. All CEF builds now force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
+**Multi-process status (Decision C18)**: Native C++ `wails-cef-host` skeleton created with CMake build, CEF init, GTK/X11 window embedding. Go `wails-go-runtime` sidecar created with Unix socket RPC framing. M3 (secure transport) pending.
+
+**Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
 **Build tag**: `cef` (e.g. `go build -tags cef`). Cannot be combined with the WebKit build tags (`gtk3`).
 
@@ -280,7 +282,7 @@ browser host safe for Chromium multi-process IPC.
 The experiment remains opt-in (`WAILS_CEF_MULTIPROCESS=1`) and must not be
 enabled for users. The single-process fallback remains the supported backend.
 
-### Decision C18: Native C++ CEF host with Go runtime backend (PROPOSED 2026-07-12)
+### Decision C18: Native C++ CEF host with Go runtime backend (🔄 IN PROGRESS 2026-07-13)
 
 **Decision**: The viable multi-process architecture moves ownership of the
 *entire CEF browser process* to a native C++ executable. Go remains the Wails
@@ -411,9 +413,55 @@ it is not a generic Node executable serving as CEF's host.
 - Unix-socket permissions, token authentication, malformed messages, timeout,
   cancellation, shutdown and child-process reaping have automated coverage.
 
-**Status**: Proposed large architectural migration. Do not treat it as an
-incremental replacement for the helper experiment; it requires a new C++ host
-and a deliberate Go backend-process boundary.
+**Status**: 🔄 IN PROGRESS — M1 (native host skeleton) and M2 (Go sidecar) started 2026-07-13.
+
+## Implementation Progress (Decision C18)
+
+### M0 — Contract freeze ✅ COMPLETE (2026-07-12)
+- Protocol defined in `v3/docs/cef-host-protocol.md`
+- Version 1 envelope schema with 7 kinds: hello, ready, request, response, event, cancel, shutdown
+- Framed transport: 4-byte big-endian length + UTF-8 JSON
+- Max payload: 16 MiB, max concurrent requests: 256
+
+### M1 — Native host skeleton 🔄 IN PROGRESS
+**Files created**:
+```
+v3/cmd/wails-cef-host/
+├── CMakeLists.txt           # C++20, links CEF + GTK4 + X11
+├── include/
+│   ├── host_app.h           # cefApp + cefBrowserProcessHandler
+│   ├── window_host.h       # GTK/X11 window host wrapper
+│   └── ipc_handler.h       # Unix socket RPC primitives
+└── src/
+    ├── main.cc             # main: CefExecuteProcess + gtk_main
+    ├── host_app.cc         # CefApp impl, command-line switches
+    └── window_host.cc      # GTK socket embedding, resize handling
+```
+
+### M2 — Go runtime sidecar 🔄 IN PROGRESS
+**Files created**:
+```
+v3/cmd/wails-go-runtime/
+├── go.mod                  # module github.com/wailsapp/wails/v3/cmd/wails-go-runtime
+└── main.go                 # Unix socket client, MessageProcessor bridge, envelope framing
+```
+
+### M3 — Secure transport 📋 PENDING
+- Unix socket server in C++ (listening)
+- Go client connects with hello/ready handshake
+- Capability token validation on every frame
+
+### M4 — Asset and startup path 📋 PENDING
+- C++ ResourceRequestHandler proxies `wails://` to Go asset service
+
+### M5 — Async bindings 📋 PENDING
+- V8 extension → C++ host → Go MessageProcessor over RPC
+
+### M6 — Native feature parity 📋 PENDING
+- window, dialogs, menus, clipboard, DnD
+
+### M7 — Build and package 📋 PENDING
+### M8 — Promotion 📋 PENDING
 
 ### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
 
@@ -522,6 +570,7 @@ Wiring:
 
 ## Key Files
 
+### Single-Process CEF Backend (current)
 | File | Role |
 |------|------|
 | `v3/pkg/application/linux_cgo_cef.go` | CGo C code: X11 embedding, reparenting, idle pump, view tracking list |
@@ -535,15 +584,28 @@ Wiring:
 | `v3/pkg/application/cef_drag_handler.go` | DragHandler — captures `DragData` on `OnDragEnter`, exposes paths via `wails_cefResolveDrop` (see Decision C11) |
 | `v3/pkg/application/cef_jsdialog_handler.go` | JsdialogHandler (alert/confirm/prompt/beforeunload) |
 | `v3/pkg/application/events_common_linux_cef.go` | CEF build's lifecycle glue: Linux→Common event mapping, sleep/wake (logind dbus), theme change (xdg portal), `processWindowEvent` C-callable forwarder (see Decision C13) |
-| `v3/pkg/application/cef_wayland_linux.go` | Wayland session detection (`detectWaylandSession`, `waylandRuntimeStyle`), runtime-style selector. See Decision C15 (superseded by C16). |
-| `v3/pkg/application/cef_wayland_linux_test.go` | 12 test cases covering union-of-signals detection, cache reset, case-insensitive matching, runtime-style selection. |
-| `v3/pkg/application/cef_js_shim.js` | V8 extension JS — declares `wails_*` native functions and installs the CEF drag-drop capture-phase drop handler |
+| `v3/pkg/application/cef_wayland_linux.go` | Wayland session detection (see Decision C16). |
+| `v3/pkg/application/cef_js_shim.js` | V8 extension JS — declares `wails_*` native functions |
 | `v3/pkg/application/dialogs_linux_cef_runtime.go` | CEF-build dialog stubs (Go-initiated file dialogs disabled) |
 | `v3/scripts/download-cef.sh` | CEF runtime auto-download script |
 | `v3/pkg/application/webview_window_linux_cef.go` | Go-level window creation, init sequence |
-| `v3/examples/cef-hello/main.go` | Minimal demo: card UI with gradient, timer, CDP test |
-| `v3/examples/cef-multiwin/main.go` | Multi-window demo: 2 CEF windows in same process |
-| `v3/examples/cef-shadcn-admin/main.go` | Full demo: shadcn/ui dashboard with SPA routing |
+| `v3/examples/cef-hello/main.go` | Minimal demo |
+| `v3/examples/cef-multiwin/main.go` | Multi-window demo |
+| `v3/examples/cef-shadcn-admin/main.go` | Full demo with SPA routing |
+
+### Multi-Process CEF Host (Decision C18 - IN PROGRESS)
+| File | Role |
+|------|------|
+| `v3/cmd/wails-cef-host/CMakeLists.txt` | C++20 build: CEF + GTK4 + X11 |
+| `v3/cmd/wails-cef-host/include/host_app.h` | cefApp + cefBrowserProcessHandler declarations |
+| `v3/cmd/wails-cef-host/include/window_host.h` | GTK/X11 window embedding wrapper |
+| `v3/cmd/wails-cef-host/include/ipc_handler.h` | Unix socket RPC framing + envelope types |
+| `v3/cmd/wails-cef-host/src/main.cc` | CefExecuteProcess + gtk_main + message pump |
+| `v3/cmd/wails-cef-host/src/host_app.cc` | CEF app init, command-line switches, scheme registration |
+| `v3/cmd/wails-cef-host/src/window_host.cc` | GtkSocket → CEF view embedding + resize |
+| `v3/cmd/wails-cef-host/src/ipc_handler.cc` | Envelope serialization, Unix socket server |
+| `v3/cmd/wails-go-runtime/go.mod` | Go sidecar module |
+| `v3/cmd/wails-go-runtime/main.go` | Socket client, MessageProcessor bridge, envelope framing |
 
 ## Runtime Dependencies
 
