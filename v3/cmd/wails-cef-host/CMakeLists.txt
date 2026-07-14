@@ -25,6 +25,7 @@ add_executable(wails-cef-host
     src/cef_v8_handler.cc
     src/host_adapter.cc
     src/validate_cef.cc
+    src/spawn_sidecar.cc
 )
 
 target_include_directories(wails-cef-host PRIVATE
@@ -66,5 +67,20 @@ target_include_directories(validate_cef_test PRIVATE
 )
 target_link_libraries(validate_cef_test PRIVATE stdc++fs)
 set_target_properties(validate_cef_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+
+# spawn_sidecar_test exercises the M2+M3 spawn/handshake logic without
+# requiring CEF or the actual wails-go-runtime. It forks small helper
+# children that mimic the sidecar's hello frame.
+add_executable(spawn_sidecar_test
+    tests/spawn_sidecar_test.cc
+    src/spawn_sidecar.cc
+)
+target_include_directories(spawn_sidecar_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(spawn_sidecar_test PRIVATE stdc++fs pthread)
+set_target_properties(spawn_sidecar_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
 )

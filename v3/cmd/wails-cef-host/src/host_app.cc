@@ -89,7 +89,15 @@ CefRefPtr<CefClient> HostApp::GetDefaultClient() {
 
 void HostApp::CreateBrowserWindow(const std::string& url) {
     CefWindowInfo window_info;
-    window_info.SetAsWindowless(0);
+    // On Linux/X11, CEF 147 exposes SetAsChild and SetAsWindowless only;
+    // SetAsPopup is Windows-only. We use SetAsChild with parent=0, which
+    // causes CEF to create a top-level X11 window. The window is then
+    // reparented into the GTK host widget via XReparentWindow (see
+    // Decision C3) — the GTK visual mismatch that fails when we pass
+    // CefWindowInfo.ParentWindow does not apply here because CEF creates
+    // the window with its own default visual.
+    CefRect bounds(0, 0, 1280, 768);
+    window_info.SetAsChild(0, bounds);
 
     CefBrowserSettings browser_settings;
     browser_settings.javascript_close_windows = STATE_DISABLED;

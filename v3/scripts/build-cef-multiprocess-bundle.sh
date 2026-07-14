@@ -203,6 +203,10 @@ fi
 # ----------------------------------------------------------------------------
 log "Staging CEF runtime files..."
 cp -v "${CEF_DIR}/libcef.so"        "${LIB_DIR}/libcef.so"
+# icudtl.dat must sit next to libcef.so (CEF issue #3778). Copy it both
+# to lib/ (so libcef.so finds it via dlopen's $ORIGIN) and to the bundle
+# root (so the run.sh wrapper can export ICUDTL_PATH for tooling).
+cp -v "${CEF_DIR}/icudtl.dat"       "${LIB_DIR}/icudtl.dat"
 cp -v "${CEF_DIR}/icudtl.dat"       "${OUT_DIR}/icudtl.dat"
 [[ -f "${CEF_DIR}/libEGL.so" ]]      && cp -v "${CEF_DIR}/libEGL.so"      "${LIB_DIR}/"
 [[ -f "${CEF_DIR}/libGLESv2.so" ]]   && cp -v "${CEF_DIR}/libGLESv2.so"   "${LIB_DIR}/"

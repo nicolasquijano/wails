@@ -24,14 +24,19 @@
 #include "host_app.h"
 #include "window_host.h"
 #include "ipc_handler.h"
+#include "spawn_sidecar.h"
+#include "validate_cef.h"
 
 namespace {
 
 std::string g_socket_path;
 std::string g_capability_token;
 std::string g_startup_url = "wails://localhost/";
+std::string g_assets_dir;
+pid_t g_sidecar_pid = -1;
 int g_go_sidecar_fd = -1;
 bool g_shutdown_requested = false;
+bool g_skip_sidecar = false;
 
 std::string GetEnvOr(const char* key, const char* fallback) {
     const char* val = std::getenv(key);
@@ -53,6 +58,10 @@ void ExtractCapabilityAndArgs(int argc, char** argv) {
             g_capability_token = argv[++i];
         } else if (arg == "--cef-host-url" && i + 1 < argc) {
             g_startup_url = argv[++i];
+        } else if (arg == "--cef-host-assets-dir" && i + 1 < argc) {
+            g_assets_dir = argv[++i];
+        } else if (arg == "--cef-host-skip-sidecar") {
+            g_skip_sidecar = true;
         }
     }
 }
@@ -83,6 +92,42 @@ int main(int argc, char** argv) {
 
     SetupX11();
 
+    // Validate the CEF distribution before CefInitialize. The bundle script
+    // already does this at packaging time, but we re-check at startup so a
+    // corrupted or moved bundle fails fast with an actionable error.
+    std::string cef_dir = GetEnvOr("CEF_DIR", "");
+    if (!cef_dir.empty()) {
+        auto validation = wails_cef::ValidateCefDistribution(cef_dir);
+        if (!validation.ok) {
+            std::cerr << wails_cef::FormatValidationError(validation) << std::endl;
+            return 1;
+        }
+    }
+
+    // M2+M3: spawn the Go sidecar (wails-go-runtime) and run the handshake.
+    // This must happen BEFORE CefInitialize so the IPC channel is wired up
+    // before the browser starts producing V8 events. The spawn is opt-out
+    // via --cef-host-skip-sidecar (used by tests and by the legacy
+    // single-process Go app which talks to CEF in-process).
+    std::string argv0 = argc > 0 ? std::string(argv[0]) : std::string();
+    if (!g_skip_sidecar) {
+        auto spawn = wails_cef::SpawnAndHandshake(argv0, g_assets_dir);
+        if (!spawn.ok) {
+            std::cerr << "wails-cef-host: sidecar spawn failed: "
+                      << spawn.error_message << std::endl;
+            // We do NOT exit: the host can still run with no IPC, which is
+            // useful for testing the CEF/GTK embed loop in isolation.
+        } else {
+            g_socket_path = spawn.socket_path;
+            g_capability_token = spawn.capability;
+            g_go_sidecar_fd = spawn.client_fd;
+            g_sidecar_pid = spawn.sidecar_pid;
+            std::cerr << "wails-cef-host: sidecar ready (pid="
+                      << spawn.sidecar_pid << ", socket=" << spawn.socket_path
+                      << ")" << std::endl;
+        }
+    }
+
     CefSettings settings;
     settings.multi_threaded_message_loop = false;
     settings.external_message_pump = true;
@@ -90,7 +135,6 @@ int main(int argc, char** argv) {
     settings.log_severity = LOGSEVERITY_INFO;
     settings.remote_debugging_port = 9999;
 
-    std::string cef_dir = GetEnvOr("CEF_DIR", "");
     if (!cef_dir.empty()) {
         std::string resources_dir = cef_dir + "/Resources";
         std::string locales_dir = resources_dir + "/locales";
@@ -100,6 +144,12 @@ int main(int argc, char** argv) {
 
     if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
         std::cerr << "wails-cef-host: CefInitialize failed" << std::endl;
+        if (g_sidecar_pid > 0) {
+            wails_cef::SendShutdownEnvelope(g_go_sidecar_fd, g_capability_token,
+                                            "host_init_failed");
+            wails_cef::TerminateSidecar(g_sidecar_pid);
+            if (g_go_sidecar_fd >= 0) close(g_go_sidecar_fd);
+        }
         return 1;
     }
 
@@ -119,8 +169,17 @@ int main(int argc, char** argv) {
 
     g_source_remove(pump_source);
 
+    if (g_sidecar_pid > 0) {
+        wails_cef::SendShutdownEnvelope(g_go_sidecar_fd, g_capability_token,
+                                        "host_shutdown");
+        wails_cef::TerminateSidecar(g_sidecar_pid);
+    }
     if (g_go_sidecar_fd >= 0) {
         close(g_go_sidecar_fd);
+        g_go_sidecar_fd = -1;
+    }
+    if (!g_socket_path.empty()) {
+        unlink(g_socket_path.c_str());
     }
 
     CefShutdown();

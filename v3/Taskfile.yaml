@@ -138,6 +138,25 @@ tasks:
       - cmake --build build --target validate_cef_test --parallel
       - ./build/tests/validate_cef_test
 
+  test:cef:spawn:
+    summary: Unit tests for the M2+M3 sidecar spawn and handshake (no CEF/GTK dependency)
+    platforms:
+      - linux
+    cmds:
+      - cd cmd/wails-cef-host && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - cmake --build build --target spawn_sidecar_test --parallel
+      - ./build/tests/spawn_sidecar_test
+
+  test:cef:unit:
+    summary: Run all C++ unit tests for wails-cef-host (no CEF/GTK dependency)
+    platforms:
+      - linux
+    cmds:
+      - cd cmd/wails-cef-host && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - cmake --build build --target validate_cef_test --target spawn_sidecar_test --parallel
+      - ./build/tests/validate_cef_test
+      - ./build/tests/spawn_sidecar_test
+
   build:cef:host:
     summary: Compile wails-cef-host (GTK3 + CEF 147 SDK). Requires CEF_DIR with headers and libcef_dll_wrapper.
     platforms:

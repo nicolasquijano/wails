@@ -56,6 +56,13 @@ bool IsCef147Layout(const std::string& cef_dir, ValidationResult* result) {
     for (const char* rel : kRequiredFiles) {
         std::string full = JoinPath(cef_dir, rel);
         if (!FileExists(full)) {
+            // Allow libcef.so to also live in lib/ (bundles copy it next
+            // to libEGL.so/libGLESv2.so). Other required files must remain
+            // at the documented paths.
+            if (std::string(rel) == "libcef.so" &&
+                FileExists(JoinPath(cef_dir, "lib/libcef.so"))) {
+                continue;
+            }
             result->ok = false;
             result->error_code = "missing_file";
             result->error_message = std::string("required CEF file not found: ") + full;
@@ -88,10 +95,12 @@ ValidationResult ValidateCefDistribution(const std::string& cef_dir) {
         return result;
     }
 
-    if (!FileExists(JoinPath(cef_dir, "libcef.so"))) {
+    if (!FileExists(JoinPath(cef_dir, "libcef.so")) &&
+        !FileExists(JoinPath(cef_dir, "lib/libcef.so"))) {
         result.error_code = "missing_libcef";
         result.error_message = "libcef.so not found in " + cef_dir +
-                               "; install CEF 147 or check CEF_DIR";
+                               " or " + cef_dir +
+                               "/lib; install CEF 147 or check CEF_DIR";
         return result;
     }
 
