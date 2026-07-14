@@ -6,7 +6,7 @@ This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 
 
 **Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M7 complete. C++ host (`wails-cef-host`) compiles and links successfully with CEF 147; runtime validation via `cef-hello` demo example. Multi-process bundle (`task build:cef:bundle`) produces a self-contained directory with host + sidecar + pinned CEF runtime.
 
-**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity), M7 (build and package) complete. M8 (promotion to default) pending — requires M2/M3 real spawn/handshake wiring.
+**Multi-process status (Decision C18, 2026-07-13)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity), M7 (build and package) complete; spawn/handshake wiring (M2+M3) landed in commit `432f3c75a`. End-to-end multi-process verified: `cef-hello-mp` and `cef-multiwin-mp` produce the expected `wails-cef-host → {wails-go-runtime, zygote × 2, utility, renderer × 3}` tree under `WAILS_CEF_MULTIPROCESS=1`. See `v3/scripts/smoke-examples-mp.sh`. C++ host forced back to GTK3 (Decision C19) — `GtkSocket`/`GtkPlug` for off-screen embedding, required for Linux/X11. M8 (promotion to default) still pending.
 
 **Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
@@ -515,6 +515,40 @@ dist/cef-bundle/
 ```
 
 ### M8 — Promotion 📋 PENDING
+
+### M2+M3 spawn/handshake wiring ✅ COMPLETE (2026-07-13, commit `432f3c75a`)
+
+**Files created/modified**:
+```
+v3/cmd/wails-cef-host/
+├── include/spawn_sidecar.h             # SpawnAndHandshake declaration
+├── src/spawn_sidecar.cc                # posix_spawn + Unix socket + SO_PEERCRED
+└── tests/spawn_sidecar_test.cc         # 67/67 unit checks (negotiation, timeout, forged token)
+v3/cmd/wails-cef-host/src/main.cc       # wired SpawnAndHandshake before CefInitialize
+v3/cmd/wails-cef-host/src/host_app.cc  # SetAsChild(0, bounds) instead of SetAsWindowless(0)
+v3/cmd/wails-cef-host/src/validate_cef.cc  # accepts libcef.so in CEF_DIR or CEF_DIR/lib/
+v3/scripts/smoke-mp-sidecar.sh          # standalone smoke for the sidecar handshake
+```
+
+**End-to-end verification** (commit `432f3c75a` + follow-ups):
+
+`v3/scripts/smoke-examples-mp.sh` runs each example with `WAILS_CEF_MULTIPROCESS=1` and walks `/proc/<pid>/task/<pid>/children` to dump the CEF process tree. After 8 seconds the snapshot shows the expected layout for `cef-hello-mp` and `cef-multiwin-mp`:
+
+```
+PID      PPID     args
+<browser>  <pgrp>  /tmp/mp-test/bin/wails-cef-host --cef-host-url=file:///tmp/wails-cef-mp/wails-mp-placeholder.html
+<sidecar> <browser>  /tmp/mp-test/bin/wails-go-runtime --cef-host-socket /run/.../host.sock ...
+<zygoteA> <browser>  /tmp/mp-test/bin/wails-cef-host --type=zygote --no-zygote-sandbox --no-sandbox ...
+<zygoteB> <browser>  /tmp/mp-test/bin/wails-cef-host --type=zygote --no-sandbox ...
+<utility> <zygoteB>  /tmp/mp-test/bin/wails-cef-host --type=utility --utility-sub-type=storage.mojom.StorageService ...
+<renderer> <zygoteB> /tmp/mp-test/bin/wails-cef-host --type=renderer --remote-debugging-port=9999 ...
+<renderer> <zygoteB> /tmp/mp-test/bin/wails-cef-host --type=renderer --remote-debugging-port=9999 ...
+<renderer> <zygoteB> /tmp/mp-test/bin/wails-cef-host --type=renderer --extension-process ...
+```
+
+Result: `browser=1 zygote=2 renderer=3 utility=1 sidecar=1` per example, plus `sidecar ready` in the host log. `cef-shadcn-mp` skipped (frontend dist not in this environment).
+
+**Hook**: `v3/pkg/application/application_linux_cef.go` `run()` invokes `tryMultiprocessBackend("")` before `cefInit()`. When the env var is set and the host binary is found, the Go process `unix.Exec`s `wails-cef-host --cef-host-url=file://<placeholder>`. `argv[0]` is the absolute path so `FindSidecarBinary` can locate `wails-go-runtime` via `dirname(argv[0])`. The Go runtime, MessageProcessor and bindings are dropped — the placeholder is rendered, but the multi-process tree appears.
 
 ### Decision C19: C++ CEF host remains GTK3 (2026-07-13)
 

@@ -6,6 +6,13 @@ cmd/wails3/wails
 /examples/menu/menu
 /examples/clipboard/clipboard
 /examples/plain/plain
+# CEF example build artifacts (built into /tmp by build-cef-multiprocess-bundle.sh)
+/examples/cef-hello/cef-hello
+/examples/cef-hello/cef-hello-mp
+/examples/cef-multiwin/cef-multiwin
+/examples/cef-multiwin/cef-multiwin-mp
+/examples/cef-shadcn-admin/cef-shadcn-admin
+/examples/cef-shadcn-admin/wails-cef-helper
 /cmd/wails3/ui/.task/
 # Taskfile checksum cache (any location)
 .task/

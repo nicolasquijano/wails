@@ -171,6 +171,19 @@ func (a *linuxApp) run() error {
 	a.setupCommonEvents()
 	a.listenForSystemThemeChangesCEF()
 	a.monitorPowerEventsCEF()
+
+	// Multi-process backend (Decision C18): when WAILS_CEF_MULTIPROCESS=1
+	// is set and `wails-cef-host` is available, replace the Go process
+	// image with the C++ browser process. execve does not return on
+	// success — the Go runtime is gone, and the CEF zygote/renderer/GPU
+	// tree appears as descendants of `wails-cef-host`.
+	if tookOver, err := tryMultiprocessBackend(""); err != nil {
+		debugLog("[run] multi-process backend failed: %v", err)
+	} else if tookOver {
+		// Unreachable on success.
+		return nil
+	}
+
 	if err := cefInit(); err != nil {
 		return fmt.Errorf("wails/cef: init failed: %w", err)
 	}

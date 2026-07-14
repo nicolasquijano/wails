@@ -577,11 +577,33 @@ v3/internal/assetserver/webview/
 
 **Branch**: `feat/linux-cef`
 **Started**: 2026-07-09
-**Status**: 🔄 IN PROGRESS — browser creation is pending runtime verification
+**Status**: 🔄 IN PROGRESS — single-process browser creation verified; multi-process end-to-end verified (commit `432f3c75a` + follow-ups).
 
 ### Goal
 
 Add CEF as a third webview backend on Linux, behind `-tags cef`, while preserving `webgtk` (default) and `gtk3` (legacy) untouched.
+
+### Multi-process milestone (2026-07-13)
+
+Decision C18 milestones M1–M7 complete; commit `432f3c75a` wired the actual
+spawn/handshake between the C++ host and the Go sidecar (M2+M3), and the
+`v3/scripts/smoke-examples-mp.sh` smoke test demonstrates the expected
+process tree:
+
+```
+browswer  → wails-cef-host --cef-host-url=file:///<placeholder>
+  ├─ sidecar → wails-go-runtime --cef-host-socket <sock>
+  ├─ zygote  → wails-cef-host --type=zygote --no-zygote-sandbox --no-sandbox
+  ├─ zygote  → wails-cef-host --type=zygote --no-sandbox
+  │    ├─ utility  → wails-cef-host --type=utility --utility-sub-type=storage.mojom.StorageService
+  │    ├─ renderer → wails-cef-host --type=renderer
+  │    ├─ renderer → wails-cef-host --type=renderer
+  │    └─ renderer → wails-cef-host --type=renderer --extension-process
+```
+
+Final counts per example: `browser=1 zygote=2 renderer=3 utility=1 sidecar=1`. Host log shows `sidecar ready (pid=<sidecar>, socket=<sock>)` and `DevTools listening on ws://127.0.0.1:9999/devtools/browser/<uuid>`. Decision C19 keeps the C++ host on GTK3 (GtkSocket was removed in GTK4). Full details in `CEF_IMPLEMENTATION.md`.
+
+
 
 ### Decision C.1 — CEF as opt-in via `-tags cef` (2026-07-09)
 
