@@ -129,6 +129,81 @@ tasks:
       - echo "Sanity-checking CEF build with examples/plain"
       - cd examples/plain && go build -tags cef -o /dev/null .
 
+  test:cef:validate:
+    summary: Unit tests for wails_cef::ValidateCefDistribution (no CEF/GTK dependency)
+    platforms:
+      - linux
+    cmds:
+      - cd cmd/wails-cef-host && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - cmake --build build --target validate_cef_test --parallel
+      - ./build/tests/validate_cef_test
+
+  build:cef:host:
+    summary: Compile wails-cef-host (GTK3 + CEF 147 SDK). Requires CEF_DIR with headers and libcef_dll_wrapper.
+    platforms:
+      - linux
+    env:
+      CEF_DIR: '{{.CEF_DIR | default (env "CEF_DIR")}}'
+    cmds:
+      - cmd: |
+          if [ -z "${CEF_DIR}" ]; then
+            echo "ERROR: CEF_DIR is not set" >&2
+            echo "Set CEF_DIR=/path/to/cef (must include include/ and build/libcef_dll_wrapper/libcef_dll_wrapper.a)" >&2
+            exit 1
+          fi
+      - mkdir -p cmd/wails-cef-host/build
+      - cd cmd/wails-cef-host && cmake -S . -B build -DCEF_ROOT="${CEF_DIR}" -DCMAKE_BUILD_TYPE=Release
+      - cmake --build build --parallel
+
+  build:cef:sidecar:
+    summary: Compile wails-go-runtime (Go sidecar; no CEF/GTK imports)
+    dir: cmd/wails-go-runtime
+    platforms:
+      - linux
+    cmds:
+      - go build -trimpath -ldflags="-s -w" -o wails-go-runtime .
+
+  build:cef:bundle:
+    summary: Build the multi-process CEF bundle (host + sidecar + CEF + app example)
+    desc: |
+      Produces a self-contained directory at ${BUNDLE_OUT:-./dist/cef-bundle} containing
+      run.sh, bin/{app,wails-cef-host,wails-go-runtime}, lib/libcef.so, icudtl.dat, and
+      Resources/. Run with `xvfb-run -a ./dist/cef-bundle/run.sh`.
+    platforms:
+      - linux
+    env:
+      CEF_DIR: '{{.CEF_DIR | default (env "CEF_DIR")}}'
+      EXAMPLE: '{{.EXAMPLE | default "cef-hello"}}'
+      BUNDLE_OUT: '{{.BUNDLE_OUT | default "./dist/cef-bundle"}}'
+    cmds:
+      - cmd: |
+          if [ -z "${CEF_DIR}" ]; then
+            echo "ERROR: CEF_DIR is not set" >&2
+            echo "  export CEF_DIR=/path/to/cef" >&2
+            echo "  task build:cef:bundle CEF_DIR=/path/to/cef EXAMPLE=cef-multiwin" >&2
+            exit 1
+          fi
+      - ./scripts/build-cef-multiprocess-bundle.sh \
+          --cef-dir "${CEF_DIR}" \
+          --example "${EXAMPLE}" \
+          --out-dir "${BUNDLE_OUT}"
+
+  verify:cef:bundle:
+    summary: Smoke-test a built CEF bundle (xvfb + DevTools port check)
+    platforms:
+      - linux
+    env:
+      BUNDLE_DIR: '{{.BUNDLE_DIR | default "./dist/cef-bundle"}}'
+    cmds:
+      - ./scripts/smoke-test-bundle.sh "${BUNDLE_DIR}"
+
+  test:cef:scripts:
+    summary: Regression tests for build-cef-multiprocess-bundle.sh
+    platforms:
+      - linux
+    cmds:
+      - ./scripts/test-build-script.sh
+
   test:examples:linux:cef:
     summary: Build all examples for Linux CEF opt-in (requires CEF installed)
     platforms:

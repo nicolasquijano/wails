@@ -234,8 +234,21 @@ your-app (Go)
 └─ pkg/application/cef_js_shim.js              # V8 extension injected into every frame
 
 libcef.so (CEF 147)
-├─ GTK4 widgets (GtkApplicationWindow + GtkBox)
+├─ GTK4 widgets (GtkApplicationWindow + GtkBox, managed from Go)
 └─ Chromium renderer (in subprocess) renders into reparented X11 window
+```
+
+For the **multi-process backend** (Decision C18, M7 done; M8 pending),
+the architecture is split:
+
+```
+your-app (Go) — same as above, plus opt-in fork of the sidecar
+wails-cef-host (C++ browser process) — GTK3 host widgets (Decision C19)
+├─ CefInitialize, CefBrowser, GTK windows, X11 reparent
+├─ asset/V8 → Unix-socket RPC
+└─ forks → zygote → renderer, GPU, utility, network
+wails-go-runtime (Go sidecar) — no GTK/CEF imports
+└─ MessageProcessor, services, assets, events, SQLite
 ```
 
 The CEF bridge lives in `pkg/application/`. The internal
@@ -258,3 +271,72 @@ cp -r /path/to/cef/ ./internal/cef-runtime/
 This is **not yet supported** in upstream Wails but the
 infrastructure is in place. See `phase 6` of `v3/IMPLEMENTATION.md`
 for the roadmap.
+
+## Multi-process bundle (Decision C18, M7)
+
+The single-process backend above is the only path that runs today.
+For development, packaging, and shipping, the multi-process backend
+is wired up but requires the **full CEF SDK** (headers +
+`libcef_dll_wrapper.a`) plus `cmake`, `g++`, `go`, `patchelf`,
+`pkg-config`, and (for headless verification) `xvfb` + `curl`.
+
+### Build the bundle
+
+```sh
+export CEF_DIR=/opt/cef
+task build:cef:bundle EXAMPLE=cef-hello BUNDLE_OUT=./dist/cef-bundle
+```
+
+This produces a self-contained directory:
+
+```
+dist/cef-bundle/
+├── run.sh                          # wrapper (sets LD_LIBRARY_PATH)
+├── README.txt                      # troubleshooting notes
+├── bin/
+│   ├── cef-hello                   # Go app (-tags cef)
+│   ├── wails-cef-host              # C++ browser process
+│   └── wails-go-runtime            # Go sidecar (MessageProcessor)
+├── lib/
+│   ├── libcef.so
+│   ├── libEGL.so
+│   └── libGLESv2.so
+├── icudtl.dat
+└── Resources/
+    ├── v8_context_snapshot.bin
+    ├── *.pak
+    └── locales/
+```
+
+### Run
+
+```sh
+# Headless smoke test (CI):
+xvfb-run -a ./dist/cef-bundle/run.sh
+
+# Or smoke-test a built bundle directly:
+task verify:cef:bundle BUNDLE_DIR=./dist/cef-bundle
+```
+
+### Validation gates
+
+The build script enforces Decision C16 file layout at packaging time
+(missing `libcef.so`, `icudtl.dat`, `Resources/v8_context_snapshot.bin`
+abort with an actionable error). At startup, the C++ host re-runs the
+same checks via `wails_cef::ValidateCefDistribution` so a corrupted
+bundle is detected before `CefInitialize` is called.
+
+Unit tests for the validation logic (no CEF/GTK dependency):
+
+```sh
+task test:cef:validate
+# 25/25 checks pass without needing CEF installed
+```
+
+### Status
+
+The bundle is **built and validated** but the multi-process backend
+itself is **not yet functional** end-to-end — the C++ host has placeholders
+for `posix_spawn` of the Go sidecar (M2 in Decision C18). The bundle
+runs, but renderer/zygote subprocesses won't appear unless M2/M3 are
+landed. See `CEF_IMPLEMENTATION.md` for the M2/M3/M8 follow-up work.

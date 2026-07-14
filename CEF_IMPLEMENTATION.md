@@ -4,9 +4,9 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M6 complete. C++ host (`wails-cef-host`) compiles and links successfully with CEF 147; runtime validation via `cef-hello` demo example.
+**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M7 complete. C++ host (`wails-cef-host`) compiles and links successfully with CEF 147; runtime validation via `cef-hello` demo example. Multi-process bundle (`task build:cef:bundle`) produces a self-contained directory with host + sidecar + pinned CEF runtime.
 
-**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity) all complete.
+**Multi-process status (Decision C18)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity), M7 (build and package) complete. M8 (promotion to default) pending — requires M2/M3 real spawn/handshake wiring.
 
 **Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
@@ -476,8 +476,81 @@ v3/cmd/wails-go-runtime/
 - JSON framing for IPC (ParseEnvelope/SerializeEnvelope using jsoncpp)
 - CMakeLists.txt updated with jsoncpp dependency
 
-### M7 — Build and package 📋 PENDING
+### M7 — Build and package ✅ COMPLETE (2026-07-13)
+
+**Files created**:
+```
+v3/cmd/wails-cef-host/
+├── include/validate_cef.h           # ValidationResult + ValidateCefDistribution
+└── src/validate_cef.cc             # Runtime check of CEF 147 layout
+└── tests/validate_cef_test.cc      # 25 unit-test checks, no CEF/GTK dep
+
+v3/scripts/
+├── build-cef-multiprocess-bundle.sh  # Bundle builder (host + sidecar + app + CEF)
+├── test-build-script.sh             # 15 regression checks for the builder
+└── smoke-test-bundle.sh             # xvfb + DevTools /json/version check
+```
+
+**Acceptance criteria from C18 §M7**:
+- [x] `$ORIGIN` runtime lookup — `patchelf --set-rpath '$ORIGIN/../lib'` on `wails-cef-host`.
+- [x] Validates CEF data files at startup — `wails_cef::ValidateCefDistribution` checks `libcef.so`, `icudtl.dat`, `Resources/v8_context_snapshot.bin`, `Resources/*.pak` before `CefInitialize`.
+- [x] Preserves executable permissions — `chmod 0755` on all three binaries.
+- [x] Runs from a clean bundle without `CEF_DIR` — bundle's `run.sh` sets `LD_LIBRARY_PATH` to the staged `lib/` directory.
+- [x] One build command produces host, sidecar and pinned CEF bundle — `task build:cef:bundle`.
+
+**Tests**:
+- `task test:cef:validate` — 25/25 unit checks for `ValidateCefDistribution`. No CEF/GTK dependency.
+- `task test:cef:scripts` — 15/15 regression checks for the build script (missing files, missing CEF_DIR, layout, RPATH).
+- `task verify:cef:bundle BUNDLE_DIR=./dist/cef-bundle` — boots the bundle under xvfb, fetches `http://127.0.0.1:9999/json/version`, asserts `Browser=Chrome/...`.
+
+**Bundle layout**:
+```
+dist/cef-bundle/
+├── run.sh                          # sets LD_LIBRARY_PATH and execs bin/<app>
+├── README.txt
+├── bin/{<app>,wails-cef-host,wails-go-runtime}
+├── lib/{libcef.so,libEGL.so,libGLESv2.so}
+├── icudtl.dat
+└── Resources/{v8_context_snapshot.bin,*.pak,locales/}
+```
+
 ### M8 — Promotion 📋 PENDING
+
+### Decision C19: C++ CEF host remains GTK3 (2026-07-13)
+
+**Context**: Earlier planning notes described `wails-cef-host` as
+"GTK4 + CEF + X11 + jsoncpp" (e.g. `CMakeLists.txt` comment, Decision
+C18 §M1 row, `IMPLEMENTATION.md` Phase 4 §Window icon, etc.). After
+reviewing the existing implementation during M7 work, the C++ host is
+**GTK3** and must remain GTK3 for the foreseeable future:
+
+1. **GtkSocket was removed in GTK4** — X11 embedding of the CEF view
+   into the host window relies on `GtkSocket` + `gtk_socket_get_id`
+   (`v3/cmd/wails-cef-host/src/window_host.cc`). GTK4 has no
+   replacement widget for the X11 plug/socket protocol; the only
+   alternative is the Wayland-only `xdg-foreign` protocol which CEF 147
+   does not expose (see Decision C16).
+2. **`gtk_dialog_run`, `gtk_file_chooser_dialog_new`, `gtk_menu_*` are
+   GTK3-only** — `v3/cmd/wails-cef-host/src/host_adapter.cc` uses 600+
+   lines of GTK3 APIs that have no direct GTK4 equivalent. The GTK4
+   file dialog (`GtkFileDialog`) is async/portal-based with different
+   semantics.
+3. **The Go single-process backend uses GTK4** (`pkg/application/
+   linux_cgo_cef.go`). It does not embed CEF; it only hosts the C++
+   `cefCreateBrowserInWidget` helper. There is no GTK version coupling
+   between the Go and C++ processes — the Go GTK4 process never
+   instantiates GTK3 widgets.
+
+**Decision**: `wails-cef-host` keeps `pkg_check_modules(GTK3 REQUIRED
+IMPORTED_TARGET gtk+-3.0)`. The bundle's runtime dependency is
+**libgtk-3-0**, not libgtk-4-1. This is documented in
+`v3/docs/guides/cef.md` and the CMake comments. A future GTK4 port
+of the host would require (a) `xdg-foreign` support in CEF, (b) a
+rewrite of `host_adapter.cc` to use `GtkFileDialog` + `GtkAlertDialog`
++ `GtkPopoverMenu` with their callback-based APIs, and (c) a
+replacement for the GtkSocket-based embedding. None of those are
+expected to land before v3.1, so GTK3 for the host is the path of
+least resistance.
 
 ### Decision C13: Application lifecycle hooks for CEF (2026-07-11)
 

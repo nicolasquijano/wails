@@ -24,6 +24,7 @@ add_executable(wails-cef-host
     src/cef_resource_handler.cc
     src/cef_v8_handler.cc
     src/host_adapter.cc
+    src/validate_cef.cc
 )
 
 target_include_directories(wails-cef-host PRIVATE
@@ -51,3 +52,19 @@ target_compile_options(wails-cef-host PRIVATE
 )
 
 install(TARGETS wails-cef-host DESTINATION bin)
+
+# validate_cef_test is a standalone unit-test executable that does NOT link
+# against CEF, GTK or X11. It exercises wails_cef::ValidateCefDistribution
+# against synthetic filesystem layouts and can be run in CI without a CEF
+# SDK installed. Build it with `cmake --build . --target validate_cef_test`.
+add_executable(validate_cef_test
+    tests/validate_cef_test.cc
+    src/validate_cef.cc
+)
+target_include_directories(validate_cef_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(validate_cef_test PRIVATE stdc++fs)
+set_target_properties(validate_cef_test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
