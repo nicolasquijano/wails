@@ -50,16 +50,32 @@ bool SetNonBlocking(int fd) {
 }
 
 void ExtractCapabilityAndArgs(int argc, char** argv) {
+    auto parse_flag = [](std::string_view arg, const char* prefix) -> std::string {
+        std::string pfx = std::string("--") + prefix + "=";
+        if (arg.substr(0, pfx.size()) == pfx) {
+            return std::string(arg.substr(pfx.size()));
+        }
+        return {};
+    };
     for (int i = 1; i < argc; ++i) {
         std::string_view arg(argv[i]);
+        // Handle both --key=value and --key value syntax
         if (arg == "--cef-host-socket" && i + 1 < argc) {
             g_socket_path = argv[++i];
+        } else if (auto v = parse_flag(arg, "cef-host-socket"); !v.empty()) {
+            g_socket_path = v;
         } else if (arg == "--cef-host-capability" && i + 1 < argc) {
             g_capability_token = argv[++i];
+        } else if (auto v = parse_flag(arg, "cef-host-capability"); !v.empty()) {
+            g_capability_token = v;
         } else if (arg == "--cef-host-url" && i + 1 < argc) {
             g_startup_url = argv[++i];
+        } else if (auto v = parse_flag(arg, "cef-host-url"); !v.empty()) {
+            g_startup_url = v;
         } else if (arg == "--cef-host-assets-dir" && i + 1 < argc) {
             g_assets_dir = argv[++i];
+        } else if (auto v = parse_flag(arg, "cef-host-assets-dir"); !v.empty()) {
+            g_assets_dir = v;
         } else if (arg == "--cef-host-skip-sidecar") {
             g_skip_sidecar = true;
         }
@@ -125,6 +141,9 @@ int main(int argc, char** argv) {
             std::cerr << "wails-cef-host: sidecar ready (pid="
                       << spawn.sidecar_pid << ", socket=" << spawn.socket_path
                       << ")" << std::endl;
+            // Pass the sidecar config to HostApp so OnContextInitialized
+            // can register the wails:// scheme handler factory.
+            app->SetSidecarConfig(spawn.socket_path, spawn.capability, g_assets_dir);
         }
     }
 
@@ -133,7 +152,8 @@ int main(int argc, char** argv) {
     settings.external_message_pump = true;
     settings.no_sandbox = true;
     settings.log_severity = LOGSEVERITY_INFO;
-    settings.remote_debugging_port = 9999;
+    settings.remote_debugging_port = 9998;
+
 
     if (!cef_dir.empty()) {
         std::string resources_dir = cef_dir + "/Resources";
@@ -156,6 +176,7 @@ int main(int argc, char** argv) {
     gtk_init(&argc, &argv);
 
     app->CreateBrowserWindow(g_startup_url);
+
 
     guint pump_source = g_idle_add_full(
         G_PRIORITY_DEFAULT_IDLE,

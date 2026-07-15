@@ -30,10 +30,21 @@ public:
 
     GtkApplicationWindow* GetWindow() const { return window_; }
 
+    void SetSidecarConfig(const std::string& socket_path,
+                          const std::string& capability,
+                          const std::string& assets_dir) {
+        socket_path_ = socket_path;
+        capability_ = capability;
+        assets_dir_ = assets_dir;
+    }
+
 private:
     GtkApplicationWindow* window_ = nullptr;
     CefRefPtr<CefClient> client_;
     CefRefPtr<CefBrowser> browser_;
+    std::string socket_path_;
+    std::string capability_;
+    std::string assets_dir_;
 
     IMPLEMENT_REFCOUNTING(HostApp);
     DISALLOW_COPY_AND_ASSIGN(HostApp);

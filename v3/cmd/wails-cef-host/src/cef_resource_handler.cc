@@ -14,7 +14,11 @@
 #include <cef_request.h>
 #include <cef_response.h>
 
+#include <fstream>
+#include <iostream>
+
 #include "ipc_handler.h"
+#include <json/json.h>
 
 namespace {
 
@@ -74,7 +78,22 @@ void AssetResourceHandler::GetResponseHeaders(CefRefPtr<CefResponse> response,
     if (response_ready_ && !response_body_.empty()) {
         response->SetStatus(200);
         response->SetStatusText("OK");
-        response->SetMimeType("text/html");
+        // Derive MIME type from file extension
+        std::string mime = "text/html";
+        size_t dot = url_.rfind('.');
+        if (dot != std::string::npos) {
+            std::string ext = url_.substr(dot);
+            if (ext == ".js") mime = "application/javascript";
+            else if (ext == ".css") mime = "text/css";
+            else if (ext == ".png") mime = "image/png";
+            else if (ext == ".svg") mime = "image/svg+xml";
+            else if (ext == ".ico") mime = "image/x-icon";
+            else if (ext == ".woff2") mime = "font/woff2";
+            else if (ext == ".woff") mime = "font/woff";
+            else if (ext == ".ttf") mime = "font/ttf";
+            else if (ext == ".json") mime = "application/json";
+        }
+        response->SetMimeType(mime);
         response_length = response_body_.size();
     } else {
         response->SetStatus(404);
@@ -117,8 +136,9 @@ void AssetResourceHandler::SetResponseBody(const std::vector<uint8_t>& body) {
 }
 
 AssetRequestHandler::AssetRequestHandler(const std::string& socket_path,
-                                         const std::string& capability)
-    : socket_path_(socket_path), capability_(capability) {}
+                                         const std::string& capability,
+                                         const std::string& assets_dir)
+    : socket_path_(socket_path), capability_(capability), assets_dir_(assets_dir) {}
 
 AssetRequestHandler::~AssetRequestHandler() {
     DisconnectFromGo();
@@ -138,43 +158,67 @@ void AssetRequestHandler::SendAssetRequest(const std::string& method,
                                           const std::string& post_data,
                                           int browser_id,
                                           AssetResourceHandler* handler) {
-    if (!ConnectToGo()) {
-        return;
-    }
+    std::cerr << "wails-cef-host: AssetRequest url=" << url
+              << " assets_dir=" << assets_dir_ << std::endl;
 
-    Envelope env;
-    env.version = 1;
-    env.kind = EnvelopeKind::Request;
-    env.capability = capability_;
-    env.request_id = "asset-" + std::to_string(browser_id) + "-" + url;
-    env.browser_id = browser_id;
-    env.frame_id = "0";
-    env.window_id = 0;
-    env.operation = "asset.request";
-    env.deadline_unix_ms = 0;
-
-    env.payload = std::vector<uint8_t>(post_data.begin(), post_data.end());
-
-    std::vector<uint8_t> frame = SerializeEnvelope(env);
-    if (!SendToGo(frame)) {
-        DisconnectFromGo();
-        return;
-    }
-
-    std::vector<uint8_t> resp = RecvFromGo();
-    if (resp.empty()) {
-        DisconnectFromGo();
-        return;
-    }
-
-    Envelope reply = ParseEnvelope(resp, nullptr);
-    if (reply.kind == EnvelopeKind::Response && reply.ok) {
-        if (!reply.payload.empty()) {
-            handler->SetResponseBody(reply.payload);
-        } else {
-            handler->SetResponseBody({});
+    // Serve assets directly from the filesystem instead of going through
+    // the IPC socket (which is closed after the handshake — see
+    // spawn_sidecar.cc:close(listen_fd)).
+    //
+    // Parse the wails:// URL path and join with assets_dir.
+    // URL format: wails://localhost/<path>
+    std::string path = url;
+    std::string prefix = "wails://localhost";
+    if (path.compare(0, prefix.size(), prefix) == 0) {
+        path = path.substr(prefix.size());
+    } else {
+        // Try stripping scheme+host via ://
+        auto colon_slash = path.find("://");
+        if (colon_slash != std::string::npos) {
+            auto host_start = colon_slash + 3;
+            auto path_start = path.find('/', host_start);
+            if (path_start != std::string::npos) {
+                path = path.substr(path_start);
+            } else {
+                path = "/";
+            }
         }
     }
+    if (path.empty() || path == "/") {
+        path = "/index.html";
+    }
+
+    std::string file_path = assets_dir_ + path;
+
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        std::cerr << "wails-cef-host: file not found: " << file_path << std::endl;
+        // SPA fallback: serve index.html
+        std::ifstream fallback(assets_dir_ + "/index.html",
+                               std::ios::binary | std::ios::ate);
+        if (!fallback) {
+            std::cerr << "wails-cef-host: SPA fallback also not found: "
+                      << assets_dir_ << "/index.html" << std::endl;
+            handler->SetResponseBody({});
+            return;
+        }
+        size_t size = fallback.tellg();
+        fallback.seekg(0);
+        std::vector<uint8_t> data(size);
+        fallback.read(reinterpret_cast<char*>(data.data()), size);
+        std::cerr << "wails-cef-host: served SPA fallback (" << size
+                  << " bytes)" << std::endl;
+        handler->SetResponseBody(data);
+        return;
+    }
+
+    size_t size = file.tellg();
+    file.seekg(0);
+    std::vector<uint8_t> data(size);
+    file.read(reinterpret_cast<char*>(data.data()), size);
+    std::cerr << "wails-cef-host: served " << file_path << " (" << size
+              << " bytes)" << std::endl;
+    handler->SetResponseBody(data);
 }
 
 bool AssetRequestHandler::ConnectToGo() {

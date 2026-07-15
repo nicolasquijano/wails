@@ -10,8 +10,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -334,24 +337,72 @@ func handleRuntimeCall(ctx context.Context, payload json.RawMessage, env Envelop
 	return response, ""
 }
 
+var mimeTypes = map[string]string{
+	".js":    "application/javascript",
+	".css":   "text/css",
+	".png":   "image/png",
+	".svg":   "image/svg+xml",
+	".ico":   "image/x-icon",
+	".woff2": "font/woff2",
+	".woff":  "font/woff",
+	".ttf":   "font/ttf",
+	".json":  "application/json",
+	".html":  "text/html; charset=utf-8",
+	".txt":   "text/plain",
+}
+
+func getMimeType(path string) string {
+	for ext, mime := range mimeTypes {
+		if strings.HasSuffix(path, ext) {
+			return mime
+		}
+	}
+	return "application/octet-stream"
+}
+
 func handleAssetRequest(ctx context.Context, payload json.RawMessage, env Envelope) ([]byte, string) {
 	var req struct {
-		Method  string `json:"method"`
-		URL     string `json:"url"`
+		Method   string `json:"method"`
+		URL      string `json:"url"`
 		PostData string `json:"post_data"`
 	}
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err.Error()
 	}
 
-	html := fmt.Sprintf(`<!DOCTYPE html>
-<html><head><title>Wails CEF Multi-Process</title></head>
-<body><h1>Wails CEF Multi-Process Mode</h1>
-<p>Go sidecar running. Asset: %s</p>
-<p>Protocol: v%d, RequestID: %s</p>
-</body></html>`, req.URL, protocolVersion, env.RequestID)
+	if assetsDir == "" {
+		return nil, "assets-dir not configured"
+	}
 
-	return []byte(html), ""
+	// Parse the URL to extract the path
+	parsedURL, err := url.Parse(req.URL)
+	if err != nil {
+		return nil, fmt.Sprintf("invalid URL: %v", err)
+	}
+
+	filePath := filepath.Join(assetsDir, parsedURL.Path)
+	if parsedURL.Path == "" || parsedURL.Path == "/" {
+		filePath = filepath.Join(assetsDir, "index.html")
+	}
+
+	// Check if file exists
+	fi, err := os.Stat(filePath)
+	if err != nil || fi.IsDir() {
+		// SPA fallback: serve index.html
+		indexPath := filepath.Join(assetsDir, "index.html")
+		indexBytes, err := os.ReadFile(indexPath)
+		if err != nil {
+			return nil, fmt.Sprintf("SPA fallback failed: %v", err)
+		}
+		return indexBytes, ""
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Sprintf("read file: %v", err)
+	}
+
+	return data, ""
 }
 
 func handleEvent(env Envelope) {

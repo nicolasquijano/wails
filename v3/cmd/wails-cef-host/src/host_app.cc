@@ -1,6 +1,7 @@
 #include "host_app.h"
 #include "host_client.h"
 #include "window_host.h"
+#include "cef_resource_handler.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -53,7 +54,9 @@ void HostApp::OnBeforeCommandLineProcessing(
     command_line->AppendSwitch("disable-gpu");
     command_line->AppendSwitch("in-process-gpu");
     command_line->AppendSwitchWithValue("lang", "en-US");
-    command_line->AppendSwitchWithValue("remote-debugging-port", "9999");
+    command_line->AppendSwitchWithValue("remote-debugging-port", "9998");
+    command_line->AppendSwitch("in-process-gpu");
+    command_line->AppendSwitch("no-zygote");
 
     std::string cef_dir = GetEnvOr("CEF_DIR", "");
     if (!cef_dir.empty()) {
@@ -78,8 +81,12 @@ CefRefPtr<CefBrowserProcessHandler> HostApp::GetBrowserProcessHandler() {
 }
 
 void HostApp::OnContextInitialized() {
-    if (!browser_) {
-        CreateBrowserWindow("wails://localhost/");
+    if (!socket_path_.empty() && !capability_.empty()) {
+        CefRegisterSchemeHandlerFactory(
+            "wails", "",
+            new AssetRequestHandler(socket_path_, capability_, assets_dir_));
+        std::cerr << "wails-cef-host: registered wails scheme handler (socket="
+                  << socket_path_ << ")" << std::endl;
     }
 }
 

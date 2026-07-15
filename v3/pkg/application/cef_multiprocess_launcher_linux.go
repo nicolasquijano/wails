@@ -30,7 +30,7 @@ import (
 //
 // Returns (true, nil) only when execve was successful — the function
 // never returns in that case, and the runtime is replaced.
-func tryMultiprocessBackend(assetDir string) (tookOver bool, err error) {
+func tryMultiprocessBackend(assetDir, startURL string) (tookOver bool, err error) {
 	if !cefMultiprocessRequested() {
 		return false, nil
 	}
@@ -40,16 +40,23 @@ func tryMultiprocessBackend(assetDir string) (tookOver bool, err error) {
 		return false, nil
 	}
 
-	placeholder, err := writeMultiprocessPlaceholder(assetDir)
-	if err != nil {
-		debugLog("[mp] placeholder write failed: %v; falling back", err)
-		return false, nil
+	if startURL == "" {
+		startURL = "wails://localhost/"
 	}
 
+	// Resolve assets dir: passed in > env var > placeholder dir
+	assetsDir := assetDir
+	if assetsDir == "" {
+		assetsDir = os.Getenv("WAILS_CEF_ASSETS_DIR")
+	}
+
+	// Build args: pass the real URL and assets dir, not a placeholder
 	args := []string{
-		host, // argv[0] must be the absolute path so the host can locate
-		// its sibling wails-go-runtime via Dirname(argv[0]).
-		"--cef-host-url=file://" + placeholder,
+		host,
+		"--cef-host-url=" + startURL,
+	}
+	if assetsDir != "" {
+		args = append(args, "--cef-host-assets-dir="+assetsDir)
 	}
 	if extra := os.Getenv("WAILS_CEF_HOST_ARGS"); extra != "" {
 		args = append(args, strings.Fields(extra)...)

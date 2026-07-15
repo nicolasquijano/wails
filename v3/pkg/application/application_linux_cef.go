@@ -177,7 +177,12 @@ func (a *linuxApp) run() error {
 	// image with the C++ browser process. execve does not return on
 	// success — the Go runtime is gone, and the CEF zygote/renderer/GPU
 	// tree appears as descendants of `wails-cef-host`.
-	if tookOver, err := tryMultiprocessBackend(""); err != nil {
+	//
+	// The start URL and assets directory are provided via env vars:
+	//   WAILS_CEF_START_URL  (default: "wails://localhost/")
+	//   WAILS_CEF_ASSETS_DIR (optional path to frontend assets)
+	mpStartURL := os.Getenv("WAILS_CEF_START_URL")
+	if tookOver, err := tryMultiprocessBackend("", mpStartURL); err != nil {
 		debugLog("[run] multi-process backend failed: %v", err)
 	} else if tookOver {
 		// Unreachable on success.

@@ -4,9 +4,13 @@
 
 This document tracks the CEF (Chromium Embedded Framework) backend for Wails v3 on Linux.
 
-**Current status (2026-07-13)**: Single-process CEF backend complete (Phases 1-6). Decision C18 (multi-process architecture) implementation in progress — M1-M7 complete. C++ host (`wails-cef-host`) compiles and links successfully with CEF 147; runtime validation via `cef-hello` demo example. Multi-process bundle (`task build:cef:bundle`) produces a self-contained directory with host + sidecar + pinned CEF runtime.
+**Current status (2026-07-15)**: Multi-process CEF backend (Decision C18) reaches end-to-end milestone — the shadcn-admin dashboard renders in multi-process mode under `WAILS_CEF_MULTIPROCESS=1`. C++ host (`wails-cef-host`) spawns `wails-go-runtime` sidecar, registers `wails://` custom scheme handler, and serves assets directly from the filesystem. Single-process fallback remains available.
 
-**Multi-process status (Decision C18, 2026-07-13)**: M1 (native C++ host skeleton), M2 (Go sidecar), M3 (secure transport with SO_PEERCRED), M4 (asset proxy), M5 (V8 IPC bridge), M6 (native feature parity), M7 (build and package) complete; spawn/handshake wiring (M2+M3) landed in commit `432f3c75a`. End-to-end multi-process verified: `cef-hello-mp` and `cef-multiwin-mp` produce the expected `wails-cef-host → {wails-go-runtime, zygote × 2, utility, renderer × 3}` tree under `WAILS_CEF_MULTIPROCESS=1`. See `v3/scripts/smoke-examples-mp.sh`. C++ host forced back to GTK3 (Decision C19) — `GtkSocket`/`GtkPlug` for off-screen embedding, required for Linux/X11. M8 (promotion to default) still pending.
+**Multi-process status (Decision C18, 2026-07-15)**: M1-M7 complete and verified end-to-end. M8 (promotion to default) still pending. Key fixes landed this session:
+  - `--in-process-gpu` + `--no-zygote` avoids subprocess PreSandboxStartup CHECK failures on this host (GPU subprocesses crash without it)
+  - `AssetRequestHandler` reads files directly from disk instead of going through the closed IPC socket (the listening socket is closed after handshake per `spawn_sidecar.cc:487`)
+  - `ExtractCapabilityAndArgs` now handles both `--key=value` and `--key value` syntax
+  - `--single-process` was removed because it breaks Widget/WidgetHost Mojo compositing pipelines, causing blank pages
 
 **Wayland status (2026-07-12)**: Wayland support reverted to X11-only. CEF 147's Wayland backend is not production-ready. All CEF builds force `GDK_BACKEND=x11` and `--ozone-platform=x11`, relying on XWayland on Wayland sessions. See Decision C16.
 
@@ -678,7 +682,7 @@ Wiring:
 ## Known Issues
 
 ### Critical
-- **Multi-process not implemented**: the Go-only host must keep `--single-process`. The helper experiment in Decision C17 still produces Mojo validation failures; the viable remediation is the larger native C++ host + Go backend architecture in Decision C18.
+- **Multi-process implemented (2026-07-15)**: shadcn-admin dashboard renders under `WAILS_CEF_MULTIPROCESS=1`. Uses `--in-process-gpu` + `--no-zygote` (not `--single-process`) to avoid Widget/WidgetHost Mojo compositing issues. Known limitation: `blink.mojom.Widget` message rejection still appears once on startup but doesn't prevent rendering.
 
 ### Medium
 - **Go-initiated file dialogs crash**: `CefBrowserHost::RunFileDialog` triggers SIGSEGV in single-process mode when the dialog is dismissed. Chromium V8/Mojo teardown path is broken without subprocess isolation. Renderer-initiated `<input type="file">` dialogs still work via `cefDialogHandler.OnFileDialog` returning 0 (Chromium handles natively).
@@ -892,3 +896,50 @@ budget, XWayland remains the supported deployment path.
 **Out of scope:** zero-copy CEF-to-GL composition on Wayland, transparent
 native-window overlay, multi-touch, and drag-and-drop between CEF and the
 canvas. Each needs its own design and benchmark before scheduling.
+
+---
+
+## Session log
+
+### 2026-07-15 — Multi-process CEF reaches end-to-end rendering milestone
+
+**Objective**: Make the CEF multi-process backend (`WAILS_CEF_MULTIPROCESS=1`)
+render the shadcn-admin dashboard instead of crashing.
+
+**Key findings and fixes:**
+
+1. **Root cause of SIGTRAP in `CefInitialize`**: GPU subprocesses fail with
+   `PreSandboxStartup CHECK` on this Linux host. Fixed with
+   `--in-process-gpu` + `--no-zygote` CEF switches (avoids spawning GPU
+   subprocess while keeping the renderer out-of-process).
+
+2. **`--single-process` breaks compositing**: The `blink.mojom.Widget` and
+   `blink.mojom.WidgetHost` Mojo interfaces reject messages in single-process
+   mode, causing blank pages. Removed `--single-process`.
+
+3. **Asset serving via closed IPC socket**: `spawn_sidecar.cc:487` calls
+   `close(listen_fd)` after the handshake, so `AssetRequestHandler` could not
+   open new connections. Fixed by serving assets directly from the filesystem in
+   `AssetRequestHandler::SendAssetRequest()`.
+
+4. **Args parser bug**: `--cef-host-assets-dir=value` syntax (used by
+   `cef_multiprocess_launcher_linux.go`) was not parsed; only
+   `--cef-host-assets-dir value` was. Added `=`-syntax support to
+   `ExtractCapabilityAndArgs()`.
+
+**Verified behavior**:
+- `wails-cef-host` starts, spawns `wails-go-runtime` sidecar, handshake OK
+- `CefInitialize` succeeds (no SIGTRAP)
+- Custom `wails://` scheme handler registered
+- 50+ asset requests served: `index.html` (5184 bytes), JS bundles (up to
+  335KB), CSS (111KB), favicon
+- SPA fallback works for missing assets (avatars)
+- DevTools shows title="Shadcn Admin", url="wails://localhost/"
+- Process stable for 20+ seconds (no crash)
+
+**Files modified**:
+- `v3/cmd/wails-cef-host/src/cef_resource_handler.cc` — file-based asset serving
+- `v3/cmd/wails-cef-host/include/cef_resource_handler.h` — added `assets_dir_`
+- `v3/cmd/wails-cef-host/src/host_app.cc` — removed `--single-process`, passes `assets_dir_`
+- `v3/cmd/wails-cef-host/include/host_app.h` — added `assets_dir_` member
+- `v3/cmd/wails-cef-host/src/main.cc` — `=` syntax for `ExtractCapabilityAndArgs`, passes `g_assets_dir`

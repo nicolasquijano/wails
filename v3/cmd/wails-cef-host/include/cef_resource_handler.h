@@ -47,7 +47,8 @@ private:
 class AssetRequestHandler : public CefSchemeHandlerFactory {
 public:
     explicit AssetRequestHandler(const std::string& socket_path,
-                                 const std::string& capability);
+                                 const std::string& capability,
+                                 const std::string& assets_dir);
     ~AssetRequestHandler() override;
 
     CefRefPtr<CefResourceHandler> Create(
@@ -70,6 +71,7 @@ private:
 
     std::string socket_path_;
     std::string capability_;
+    std::string assets_dir_;
     int client_fd_ = -1;
 
     friend class AssetResourceHandler;
